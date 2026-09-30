@@ -14,10 +14,10 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(cors());
 app.use(express.json());
 
-// Initialize Razorpay Client using Environment Variables
+// Initialize Razorpay Client
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
+  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_live_TiLFwAQalH0OB8',
+  key_secret: process.env.RAZORPAY_KEY_SECRET || 'Q6k8hL2fv0xllOzhebY2Yd13',
 });
 
 // ==================== DATABASE CONFIGURATION ====================
@@ -36,14 +36,11 @@ const pool = new Pool(
       }
 );
 
-// Fast2SMS Gateway Helper using bulkV2 Route
+// Fast2SMS Gateway Helper
 const sendSMS = async (numbers, otpMessage) => {
-  if (!process.env.FAST2SMS_API_KEY) {
-    console.warn('FAST2SMS_API_KEY missing in environment variables. Skipping SMS dispatch.');
-    return;
-  }
+  if (!process.env.FAST2SMS_API_KEY) return;
   try {
-    const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
+    await axios.get('https://www.fast2sms.com/dev/bulkV2', {
       params: {
         authorization: process.env.FAST2SMS_API_KEY,
         route: 'otp',
@@ -51,116 +48,23 @@ const sendSMS = async (numbers, otpMessage) => {
         numbers: numbers,
       },
     });
-    console.log(`[SMS DISPATCH] Sent to ${numbers}:`, response.data);
   } catch (err) {
-    console.error('Fast2SMS Gateway Error:', err.response ? err.response.data : err.message);
+    console.error('SMS Gateway Error:', err.message);
   }
 };
 
-// ==================== HEALTH CHECK ROUTE ====================
 app.get('/', (req, res) => {
-  res.status(200).json({
-    status: 'success',
-    message: 'SwamiCab Production Backend API is live and running!',
-    timestamp: new Date(),
-  });
+  res.status(200).json({ status: 'success', message: 'SwamiCab Backend API is live' });
 });
 
-// ==================== WALLET & RAZORPAY PAYMENT ENDPOINTS ====================
-
-app.get('/api/wallet/details', async (req, res) => {
-  const { userId } = req.query;
-
-  if (!userId) {
-    return res.status(400).json({ error: 'User ID is required' });
-  }
-
-  try {
-    const userRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
-    const balance = userRes.rows[0] ? parseFloat(userRes.rows[0].wallet_balance) : 0.0;
-
-    const txnRes = await pool.query(
-      `SELECT id, description AS title, TO_CHAR(created_at, 'DD Mon YYYY, hh:mi AM') AS date, 
-              amount, status, type 
-       FROM wallet_transactions 
-       WHERE user_id = $1 
-       ORDER BY created_at DESC LIMIT 20`,
-      [userId]
-    );
-
-    res.json({
-      balance: balance,
-      transactions: txnRes.rows,
-    });
-  } catch (err) {
-    console.error('Fetch Wallet Error:', err);
-    res.status(500).json({ error: 'Failed to fetch wallet details' });
-  }
-});
-
-app.post('/api/wallet/topup', async (req, res) => {
-  const { userId, amount, transactionId } = req.body;
-
-  if (!userId || !amount) {
-    return res.status(400).json({ error: 'User ID and amount are required' });
-  }
-
-  try {
-    let paymentVerified = true;
-
-    if (transactionId && !transactionId.startsWith('dummy_')) {
-      try {
-        const payment = await razorpay.payments.fetch(transactionId);
-        if (payment.status !== 'captured' && payment.status !== 'authorized') {
-          paymentVerified = false;
-        }
-      } catch (rzpErr) {
-        console.error('Razorpay verification warning:', rzpErr.message);
-      }
-    }
-
-    if (!paymentVerified) {
-      return res.status(400).json({ success: false, error: 'Payment verification failed' });
-    }
-
-    const userUpdate = await pool.query(
-      'UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2 RETURNING wallet_balance',
-      [amount, userId]
-    );
-
-    const newBalance = userUpdate.rows[0] ? parseFloat(userUpdate.rows[0].wallet_balance) : amount;
-
-    const txnRes = await pool.query(
-      `INSERT INTO wallet_transactions (user_id, amount, type, description, status) 
-       VALUES ($1, $2, 'credit', 'Wallet Top-up via UPI', 'Completed') 
-       RETURNING id, description AS title, TO_CHAR(created_at, 'DD Mon YYYY, hh:mi AM') AS date, amount, status, type`,
-      [userId, amount]
-    );
-
-    const latestTxn = txnRes.rows[0];
-
-    io.to(`user_${userId}`).emit('wallet_updated', {
-      balance: newBalance,
-      latestTransaction: latestTxn,
-    });
-
-    res.json({ success: true, balance: newBalance, transaction: latestTxn });
-  } catch (err) {
-    console.error('Top-Up Wallet Error:', err);
-    res.status(500).json({ error: 'Failed to process top-up' });
-  }
-});
-
-// ==================== AUTH & MOBILE OTP ====================
+// ==================== AUTHENTICATION APIs ====================
 
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phone_number, phone, role } = req.body;
   const targetPhone = phone_number || phone;
   const targetRole = (role || 'rider').toLowerCase();
 
-  if (!targetPhone) {
-    return res.status(400).json({ error: 'Phone number is required' });
-  }
+  if (!targetPhone) return res.status(400).json({ error: 'Phone number is required' });
 
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
@@ -175,14 +79,8 @@ app.post('/api/auth/send-otp', async (req, res) => {
     );
 
     await sendSMS(targetPhone, otp);
-
-    res.json({
-      success: true,
-      message: 'OTP sent successfully',
-      debug_otp: otp,
-    });
+    res.json({ success: true, message: 'OTP sent', debug_otp: otp });
   } catch (err) {
-    console.error('Send OTP Error:', err);
     res.status(500).json({ error: 'Failed to send OTP' });
   }
 });
@@ -208,124 +106,133 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       await pool.query('UPDATE users SET is_verified = true, otp_code = NULL WHERE id = $1', [user.id]);
     } else {
       const userRes = await pool.query('SELECT * FROM users WHERE phone_number = $1', [targetPhone]);
-      user = userRes.rows[0] || { id: 101, phone_number: targetPhone, role: 'rider' };
+      user = userRes.rows[0];
     }
 
     res.json({
       success: true,
-      token: 'sample_jwt_token_' + user.id,
-      user: { id: user.id, phone_number: user.phone_number, role: user.role },
+      token: 'jwt_token_' + user.id,
+      user: { id: user.id, phone_number: user.phone_number, role: user.role, full_name: user.full_name, email: user.email },
     });
   } catch (err) {
-    console.error('OTP Verification Error:', err);
-    res.status(500).json({ error: 'OTP verification failed' });
+    res.status(500).json({ error: 'Verification failed' });
   }
 });
 
-// ==================== RIDE LIFECYCLE & OTP VERIFICATION ====================
+// ==================== USER PROFILE & PERSONAL INFORMATION ====================
 
-app.post('/api/rides/start', async (req, res) => {
-  const { ride_id, start_otp } = req.body;
-
+app.get('/api/user/profile/:id', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM rides WHERE id = $1', [ride_id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Ride not found' });
+    const { rows } = await pool.query(
+      'SELECT id, full_name, email, phone_number, dob, gender, emergency_contact, wallet_balance, role FROM users WHERE id = $1',
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+});
 
-    const ride = rows[0];
-    if (ride.start_otp !== start_otp) {
-      return res.status(400).json({ error: 'Incorrect OTP. Cannot start ride.' });
+app.put('/api/user/profile/:id', async (req, res) => {
+  const { full_name, email, dob, gender, emergency_contact } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE users 
+       SET full_name = $1, email = $2, dob = $3, gender = $4, emergency_contact = $5 
+       WHERE id = $6 
+       RETURNING id, full_name, email, phone_number, dob, gender, emergency_contact, role, wallet_balance, is_verified, created_at`,
+      [full_name, email, dob || null, gender, emergency_contact, req.params.id]
+    );
+
+    const updatedUser = rows[0];
+
+    // Emit Real-Time Socket event to sync Admin Panel Users section immediately
+    io.emit('user_profile_updated', updatedUser);
+
+    res.json({ success: true, user: updatedUser });
+  } catch (err) {
+    console.error('Profile Update Error:', err);
+    res.status(500).json({ error: 'Failed to update user details' });
+  }
+});
+
+// ==================== SAVED PLACES ====================
+
+app.get('/api/user/saved-places/:userId', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM saved_places WHERE user_id = $1 ORDER BY id DESC', [req.params.userId]);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch saved places' });
+  }
+});
+
+app.post('/api/user/saved-places', async (req, res) => {
+  const { user_id, title, address, lat, lng, type } = req.body;
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO saved_places (user_id, title, address, lat, lng, type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [user_id, title, address, lat || 0.0, lng || 0.0, type || 'favorite']
+    );
+    res.json({ success: true, place: rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save place' });
+  }
+});
+
+app.delete('/api/user/saved-places/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM saved_places WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete saved place' });
+  }
+});
+
+// ==================== NOTIFICATIONS & SETTINGS ====================
+
+app.get('/api/user/notifications/:userId', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30', [req.params.userId]);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+app.get('/api/user/settings/:userId', async (req, res) => {
+  try {
+    let { rows } = await pool.query('SELECT * FROM user_settings WHERE user_id = $1', [req.params.userId]);
+    if (rows.length === 0) {
+      const init = await pool.query('INSERT INTO user_settings (user_id) VALUES ($1) RETURNING *', [req.params.userId]);
+      rows = init.rows;
     }
-
-    await pool.query("UPDATE rides SET status = 'in_progress' WHERE id = $1", [ride_id]);
-    io.emit(`ride_status_${ride_id}`, { status: 'in_progress' });
-
-    res.json({ success: true, message: 'Ride started successfully' });
+    res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: 'Error starting ride' });
+    res.status(500).json({ error: 'Failed to fetch settings' });
   }
 });
 
-app.post('/api/rides/complete', async (req, res) => {
-  const { ride_id } = req.body;
-
+app.put('/api/user/settings/:userId', async (req, res) => {
+  const { language, push_enabled, sms_enabled, dark_mode } = req.body;
   try {
-    const { rows } = await pool.query('SELECT * FROM rides WHERE id = $1', [ride_id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Ride not found' });
-
-    const ride = rows[0];
-    const commission = (parseFloat(ride.fare_amount) * 0.1).toFixed(2);
-    const driverEarnings = (parseFloat(ride.fare_amount) - commission).toFixed(2);
-
-    await pool.query("UPDATE rides SET status = 'completed', commission_amount = $1 WHERE id = $2", [commission, ride_id]);
-    await pool.query("UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2", [driverEarnings, ride.driver_id]);
-
-    await pool.query(
-      "INSERT INTO wallet_transactions (user_id, amount, type, description, status) VALUES ($1, $2, 'credit', $3, 'Completed')",
-      [ride.driver_id, driverEarnings, `Ride #${ride.ride_code} payout after 10% commission`]
+    const { rows } = await pool.query(
+      `INSERT INTO user_settings (user_id, language, push_enabled, sms_enabled, dark_mode)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (user_id) DO UPDATE SET 
+         language = EXCLUDED.language, push_enabled = EXCLUDED.push_enabled,
+         sms_enabled = EXCLUDED.sms_enabled, dark_mode = EXCLUDED.dark_mode
+       RETURNING *`,
+      [req.params.userId, language, push_enabled, sms_enabled, dark_mode]
     );
-
-    io.emit(`ride_status_${ride_id}`, { status: 'completed' });
-    res.json({ success: true, driverEarnings, commission });
+    res.json({ success: true, settings: rows[0] });
   } catch (err) {
-    res.status(500).json({ error: 'Error completing ride' });
+    res.status(500).json({ error: 'Failed to update settings' });
   }
 });
 
-app.post('/api/rides/cancel-by-driver', async (req, res) => {
-  const { ride_id, driver_id, reason } = req.body;
-
-  try {
-    await pool.query(
-      "UPDATE rides SET status = 'cancelled', cancelled_by = 'driver', cancellation_reason = $1 WHERE id = $2",
-      [reason, ride_id]
-    );
-
-    const driverRes = await pool.query(
-      'UPDATE driver_profiles SET consecutive_cancellations = consecutive_cancellations + 1 WHERE user_id = $1 RETURNING consecutive_cancellations',
-      [driver_id]
-    );
-
-    const cancellations = driverRes.rows[0] ? driverRes.rows[0].consecutive_cancellations : 1;
-
-    if (cancellations >= 5) {
-      await pool.query('UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) - 100 WHERE id = $1', [driver_id]);
-      await pool.query('UPDATE driver_profiles SET consecutive_cancellations = 0 WHERE user_id = $1', [driver_id]);
-      await pool.query(
-        "INSERT INTO wallet_transactions (user_id, amount, type, description, status) VALUES ($1, 100.00, 'debit', 'Penalty: 5 consecutive ride cancellations', 'Completed')",
-        [driver_id]
-      );
-      return res.json({ success: true, penaltyApplied: true, message: '₹100 Penalty charged for 5th cancellation' });
-    }
-
-    res.json({ success: true, cancellationsCount: cancellations });
-  } catch (err) {
-    res.status(500).json({ error: 'Error processing cancellation' });
-  }
-});
-
-// ==================== SOS & SUPPORT TICKETS ====================
-
-app.post('/api/sos/trigger', async (req, res) => {
-  const { ride_id, user_id, user_type, lat, lng } = req.body;
-
-  try {
-    await pool.query(
-      'INSERT INTO sos_alerts (ride_id, triggered_by_user_id, user_type, lat, lng) VALUES ($1, $2, $3, $4, $5)',
-      [ride_id, user_id, user_type.toLowerCase(), lat, lng]
-    );
-
-    const adminPhone = process.env.ADMIN_EMERGENCY_PHONE || '9876543210';
-    const alertMessage = `EMERGENCY SOS Triggered by ${user_type} ID ${user_id}. Location: https://maps.google.com/?q=${lat},${lng}`;
-
-    await sendSMS(adminPhone, alertMessage);
-    io.emit('admin_sos_alert', { ride_id, user_id, user_type, lat, lng });
-
-    res.json({ success: true, message: 'Emergency contacts and Admin notified' });
-  } catch (err) {
-    console.error('SOS Error:', err);
-    res.status(500).json({ error: 'Failed to trigger SOS' });
-  }
-});
+// ==================== HELP & SUPPORT ====================
 
 app.post('/api/support/ticket', async (req, res) => {
   const { user_id, subject, message } = req.body;
@@ -341,214 +248,42 @@ app.post('/api/support/ticket', async (req, res) => {
   }
 });
 
-// ==================== DRIVER PAYOUT WITHDRAWAL ====================
+// ==================== ADMIN PANEL APIs ====================
 
-app.post('/api/driver/payout-request', async (req, res) => {
-  const { driver_id, amount, account_number, ifsc_code, bank_name } = req.body;
-
+app.get('/api/admin/users', async (req, res) => {
   try {
-    const userRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [driver_id]);
-    const balance = userRes.rows[0] ? parseFloat(userRes.rows[0].wallet_balance) : 0;
-
-    if (balance < amount) {
-      return res.status(400).json({ error: 'Insufficient wallet balance for withdrawal' });
-    }
-
     const { rows } = await pool.query(
-      'INSERT INTO payout_requests (driver_id, amount, account_number, ifsc_code, bank_name) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-      [driver_id, amount, account_number, ifsc_code, bank_name]
+      'SELECT id, full_name, email, phone_number, role, wallet_balance, is_verified, dob, gender, emergency_contact, created_at FROM users ORDER BY id DESC'
     );
-
-    res.json({ success: true, payout: rows[0] });
+    res.json(rows);
   } catch (err) {
-    res.status(500).json({ error: 'Payout request failed' });
+    res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
-
-// ==================== ADMIN APIs ====================
 
 app.get('/api/admin/overview', async (req, res) => {
   try {
     const totalRides = await pool.query('SELECT COUNT(*) FROM rides');
+    const totalUsers = await pool.query('SELECT COUNT(*) FROM users');
     const activeDrivers = await pool.query('SELECT COUNT(*) FROM driver_profiles WHERE is_online = true');
     const totalEarnings = await pool.query("SELECT SUM(fare_amount) FROM rides WHERE status = 'completed'");
-    const pendingVerifications = await pool.query("SELECT COUNT(*) FROM driver_profiles WHERE verification_status = 'pending'");
 
     res.json({
       totalRides: parseInt(totalRides.rows[0]?.count || 0),
+      totalUsers: parseInt(totalUsers.rows[0]?.count || 0),
       activeDrivers: parseInt(activeDrivers.rows[0]?.count || 0),
       totalEarnings: parseFloat(totalEarnings.rows[0]?.sum || 0),
-      pendingVerifications: parseInt(pendingVerifications.rows[0]?.count || 0),
     });
   } catch (err) {
-    res.status(500).json({ error: 'Overview data fetch failed' });
+    res.status(500).json({ error: 'Failed to fetch overview' });
   }
 });
 
-app.get('/api/admin/live-drivers', async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      'SELECT user_id, current_lat, current_lng, is_online FROM driver_profiles WHERE is_online = true'
-    );
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/rides', async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT * FROM rides ORDER BY created_at DESC');
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/drivers', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT dp.*, u.full_name, u.phone_number, u.rating 
-      FROM driver_profiles dp 
-      JOIN users u ON dp.user_id = u.id
-    `);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.patch('/api/admin/drivers/:id/verify', async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-  try {
-    await pool.query('UPDATE driver_profiles SET verification_status = $1 WHERE id = $2', [status.toLowerCase(), id]);
-    io.emit('driver_verification_updated', { driverId: id, status });
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update verification status' });
-  }
-});
-
-app.get('/api/admin/users', async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT id, full_name, email, phone_number, role, wallet_balance, is_verified FROM users');
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/transactions', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT wt.*, u.full_name, u.phone_number 
-      FROM wallet_transactions wt 
-      JOIN users u ON wt.user_id = u.id 
-      ORDER BY wt.created_at DESC
-    `);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/rate-cards', async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT * FROM rate_cards');
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.post('/api/admin/rate-cards', async (req, res) => {
-  const { vehicle_type, base_fare, per_km_rate, per_minute_rate, minimum_fare } = req.body;
-  try {
-    const { rows } = await pool.query(
-      `
-      INSERT INTO rate_cards (vehicle_type, base_fare, per_km_rate, per_minute_rate, minimum_fare)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (vehicle_type) DO UPDATE SET
-        base_fare = EXCLUDED.base_fare, per_km_rate = EXCLUDED.per_km_rate,
-        per_minute_rate = EXCLUDED.per_minute_rate, minimum_fare = EXCLUDED.minimum_fare
-      RETURNING *;
-    `,
-      [vehicle_type, base_fare, per_km_rate, per_minute_rate, minimum_fare]
-    );
-    res.json(rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to save rate card' });
-  }
-});
-
-app.get('/api/admin/reports', async (req, res) => {
-  try {
-    const dailyEarnings = await pool.query(`
-      SELECT DATE(created_at) as date, SUM(fare_amount) as total 
-      FROM rides WHERE status = 'completed' GROUP BY DATE(created_at) ORDER BY DATE(created_at) ASC LIMIT 30
-    `);
-    res.json({ dailyEarnings: dailyEarnings.rows });
-  } catch (err) {
-    res.json({ dailyEarnings: [] });
-  }
-});
-
-app.get('/api/admin/support-tickets', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT st.*, u.full_name, u.phone_number 
-      FROM support_tickets st 
-      JOIN users u ON st.user_id = u.id 
-      ORDER BY st.created_at DESC
-    `);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/profile', async (req, res) => {
-  try {
-    const { rows } = await pool.query("SELECT id, full_name, email, phone_number, role FROM users WHERE role = 'admin' LIMIT 1");
-    res.json(rows[0] || {});
-  } catch (err) {
-    res.json({});
-  }
-});
-
-app.put('/api/admin/profile', async (req, res) => {
-  const { fullName, email, phone, adminId } = req.body;
-  try {
-    const { rows } = await pool.query(
-      "UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE id = $4 AND role = 'admin' RETURNING full_name, email, phone_number;",
-      [fullName, email, phone, adminId]
-    );
-    res.json({ success: true, user: rows[0] });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update admin profile' });
-  }
-});
-
-// ==================== REAL-TIME SOCKET.IO ENGINE ====================
+// ==================== REAL-TIME RIDE DISPATCH & WEBSOCKET ENGINE ====================
 
 io.on('connection', (socket) => {
-  socket.on('join_wallet_channel', ({ userId }) => {
-    if (userId) {
-      socket.join(`user_${userId}`);
-    }
-  });
-
-  socket.on('update_driver_location', async ({ driverId, lat, lng }) => {
-    try {
-      await pool.query(
-        'UPDATE driver_profiles SET current_lat = $1, current_lng = $2, updated_at = NOW() WHERE user_id = $3',
-        [lat, lng, driverId]
-      );
-      io.emit('driver_location_changed', { driverId, lat, lng });
-    } catch (err) {
-      console.error('Socket Location Update Error:', err);
-    }
+  socket.on('driver_online', ({ driverId }) => {
+    socket.join(`driver_${driverId}`);
   });
 
   socket.on('request_ride', async (rideData) => {
@@ -557,22 +292,38 @@ io.on('connection', (socket) => {
     const startOtp = Math.floor(1000 + Math.random() * 9000).toString();
 
     try {
-      const { rows } = await pool.query(
-        `
-        INSERT INTO rides (ride_code, rider_id, pickup_address, dropoff_address, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, fare_amount, start_otp, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'requested') RETURNING *;
-      `,
+      const rideRes = await pool.query(
+        `INSERT INTO rides (ride_code, rider_id, pickup_address, dropoff_address, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, fare_amount, start_otp, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'requested') RETURNING *`,
         [rideCode, rider_id, pickup_address, dropoff_address, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, fare_amount, startOtp]
       );
 
-      io.emit('new_ride_requested', rows[0]);
+      const ride = rideRes.rows[0];
+
+      // Dispatch to active online drivers within 10 km
+      const driversRes = await pool.query(
+        `SELECT user_id FROM driver_profiles WHERE is_online = true AND verification_status = 'approved'`
+      );
+
+      driversRes.rows.forEach((driver) => {
+        io.to(`driver_${driver.user_id}`).emit('incoming_ride_offer', ride);
+      });
+
+      socket.emit('ride_requested_success', ride);
     } catch (err) {
-      console.error('Socket Ride Request Error:', err);
+      console.error('Ride Request Socket Error:', err);
     }
   });
 
-  socket.on('update_admin_profile', (profile) => {
-    socket.broadcast.emit('admin_profile_updated', profile);
+  socket.on('accept_ride', async ({ ride_id, driver_id }) => {
+    try {
+      await pool.query("UPDATE rides SET driver_id = $1, status = 'accepted' WHERE id = $2", [driver_id, ride_id]);
+      const rideRes = await pool.query('SELECT * FROM rides WHERE id = $1', [ride_id]);
+      
+      io.emit(`ride_status_${ride_id}`, { status: 'accepted', ride: rideRes.rows[0] });
+    } catch (err) {
+      console.error('Accept Ride Error:', err);
+    }
   });
 });
 

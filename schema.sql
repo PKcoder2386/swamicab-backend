@@ -1,9 +1,12 @@
--- Core Users Table (Riders, Drivers, Admins)
+-- Core Users Table (Updated with extended personal information fields)
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     phone_number VARCHAR(15) UNIQUE NOT NULL,
     full_name VARCHAR(100),
     email VARCHAR(100) UNIQUE,
+    dob DATE,
+    gender VARCHAR(20),
+    emergency_contact VARCHAR(15),
     role VARCHAR(20) CHECK (role IN ('rider', 'driver', 'admin')) DEFAULT 'rider',
     otp_code VARCHAR(6),
     otp_expires_at TIMESTAMP,
@@ -13,7 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Driver Profile & Verification Pipeline
+-- Driver Profile & Verification
 CREATE TABLE IF NOT EXISTS driver_profiles (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id) ON DELETE CASCADE,
@@ -26,6 +29,37 @@ CREATE TABLE IF NOT EXISTS driver_profiles (
     current_lat NUMERIC(10,8),
     current_lng NUMERIC(11,8),
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Saved Places (Home, Work, Favorites)
+CREATE TABLE IF NOT EXISTS saved_places (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(50) NOT NULL,
+    address TEXT NOT NULL,
+    lat NUMERIC(10,8) NOT NULL,
+    lng NUMERIC(11,8) NOT NULL,
+    type VARCHAR(20) CHECK (type IN ('home', 'work', 'favorite')) DEFAULT 'favorite',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- In-App Notifications
+CREATE TABLE IF NOT EXISTS notifications (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(150) NOT NULL,
+    message TEXT NOT NULL,
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- User App Preferences & Settings
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    language VARCHAR(10) DEFAULT 'en',
+    push_enabled BOOLEAN DEFAULT TRUE,
+    sms_enabled BOOLEAN DEFAULT TRUE,
+    dark_mode BOOLEAN DEFAULT FALSE
 );
 
 -- Rides Management
@@ -49,17 +83,7 @@ CREATE TABLE IF NOT EXISTS rides (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Rate Card Manager
-CREATE TABLE IF NOT EXISTS rate_cards (
-    id SERIAL PRIMARY KEY,
-    vehicle_type VARCHAR(50) UNIQUE NOT NULL,
-    base_fare NUMERIC(8,2) NOT NULL,
-    per_km_rate NUMERIC(8,2) NOT NULL,
-    per_minute_rate NUMERIC(8,2) NOT NULL,
-    minimum_fare NUMERIC(8,2) NOT NULL
-);
-
--- Wallet & Payments (Updated with status column)
+-- Wallet & Transactions
 CREATE TABLE IF NOT EXISTS wallet_transactions (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id),
@@ -80,21 +104,17 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Admin System Settings
-CREATE TABLE IF NOT EXISTS admin_settings (
+-- Rate Card Manager
+CREATE TABLE IF NOT EXISTS rate_cards (
     id SERIAL PRIMARY KEY,
-    account_holder_name VARCHAR(255),
-    account_number VARCHAR(100),
-    ifsc_code VARCHAR(50),
-    bank_name VARCHAR(100),
-    upi_id VARCHAR(100),
-    auto_commission_routing BOOLEAN DEFAULT TRUE,
-    commission_percentage NUMERIC(5,2) DEFAULT 10.00,
-    two_factor_enabled BOOLEAN DEFAULT FALSE,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    vehicle_type VARCHAR(50) UNIQUE NOT NULL,
+    base_fare NUMERIC(8,2) NOT NULL,
+    per_km_rate NUMERIC(8,2) NOT NULL,
+    per_minute_rate NUMERIC(8,2) NOT NULL,
+    minimum_fare NUMERIC(8,2) NOT NULL
 );
 
--- SOS Alerts Tracking
+-- SOS Emergency Alerts
 CREATE TABLE IF NOT EXISTS sos_alerts (
     id SERIAL PRIMARY KEY,
     ride_id INT REFERENCES rides(id) ON DELETE CASCADE,
@@ -103,17 +123,5 @@ CREATE TABLE IF NOT EXISTS sos_alerts (
     lat NUMERIC(10,8),
     lng NUMERIC(11,8),
     status VARCHAR(20) DEFAULT 'ACTIVE',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Driver Bank Payout Requests
-CREATE TABLE IF NOT EXISTS payout_requests (
-    id SERIAL PRIMARY KEY,
-    driver_id INT REFERENCES users(id),
-    amount NUMERIC(10,2) NOT NULL,
-    account_number VARCHAR(50),
-    ifsc_code VARCHAR(20),
-    bank_name VARCHAR(100),
-    status VARCHAR(20) CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')) DEFAULT 'PENDING',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
