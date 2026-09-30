@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Driver Profile & Verification Pipeline (Includes cancellation counter)
+-- Driver Profile & Verification Pipeline
 CREATE TABLE IF NOT EXISTS driver_profiles (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id) ON DELETE CASCADE,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS driver_profiles (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Rides Management (Includes start OTP and cancellation details)
+-- Rides Management
 CREATE TABLE IF NOT EXISTS rides (
     id SERIAL PRIMARY KEY,
     ride_code VARCHAR(20) UNIQUE NOT NULL,
@@ -59,13 +59,14 @@ CREATE TABLE IF NOT EXISTS rate_cards (
     minimum_fare NUMERIC(8,2) NOT NULL
 );
 
--- Wallet & Payments
+-- Wallet & Payments (Updated with status column)
 CREATE TABLE IF NOT EXISTS wallet_transactions (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id),
     amount NUMERIC(10,2) NOT NULL,
     type VARCHAR(20) CHECK (type IN ('credit', 'debit')),
     description TEXT,
+    status VARCHAR(20) DEFAULT 'Completed',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -14,10 +14,10 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(cors());
 app.use(express.json());
 
-// Initialize Razorpay Client with Environment Variables
+// Initialize Razorpay Client using Environment Variables
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_live_TiLFwAQalH0OB8',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || 'Q6k8hL2fv0xllOzhebY2Yd13',
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
 // ==================== DATABASE CONFIGURATION ====================
@@ -25,13 +25,13 @@ const pool = new Pool(
   process.env.DATABASE_URL
     ? {
         connectionString: process.env.DATABASE_URL,
-        ssl: { rejectUnauthorized: false }, // Required for Render PostgreSQL
+        ssl: { rejectUnauthorized: false },
       }
     : {
         user: process.env.PGUSER || 'postgres',
         host: process.env.PGHOST || 'localhost',
         database: process.env.PGDATABASE || 'swamicab_db',
-        password: process.env.PGPASSWORD || 'Pranit@2386',
+        password: process.env.PGPASSWORD,
         port: process.env.PGPORT || 5432,
       }
 );
@@ -39,7 +39,7 @@ const pool = new Pool(
 // Fast2SMS Gateway Helper using bulkV2 Route
 const sendSMS = async (numbers, otpMessage) => {
   if (!process.env.FAST2SMS_API_KEY) {
-    console.warn('FAST2SMS_API_KEY not found in environment variables. Skipping SMS dispatch.');
+    console.warn('FAST2SMS_API_KEY missing in environment variables. Skipping SMS dispatch.');
     return;
   }
   try {
@@ -68,7 +68,6 @@ app.get('/', (req, res) => {
 
 // ==================== WALLET & RAZORPAY PAYMENT ENDPOINTS ====================
 
-// Fetch Wallet Balance and Recent Transactions
 app.get('/api/wallet/details', async (req, res) => {
   const { userId } = req.query;
 
@@ -99,7 +98,6 @@ app.get('/api/wallet/details', async (req, res) => {
   }
 });
 
-// Verify Real-time Razorpay Payment & Top-Up Wallet
 app.post('/api/wallet/topup', async (req, res) => {
   const { userId, amount, transactionId } = req.body;
 
@@ -110,7 +108,6 @@ app.post('/api/wallet/topup', async (req, res) => {
   try {
     let paymentVerified = true;
 
-    // Verify payment status with Razorpay if transaction ID is provided
     if (transactionId && !transactionId.startsWith('dummy_')) {
       try {
         const payment = await razorpay.payments.fetch(transactionId);
@@ -126,7 +123,6 @@ app.post('/api/wallet/topup', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Payment verification failed' });
     }
 
-    // 1. Update User Wallet Balance in DB
     const userUpdate = await pool.query(
       'UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2 RETURNING wallet_balance',
       [amount, userId]
@@ -134,17 +130,15 @@ app.post('/api/wallet/topup', async (req, res) => {
 
     const newBalance = userUpdate.rows[0] ? parseFloat(userUpdate.rows[0].wallet_balance) : amount;
 
-    // 2. Insert Transaction Record into DB
     const txnRes = await pool.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, description, status) 
        VALUES ($1, $2, 'credit', 'Wallet Top-up via UPI', 'Completed') 
        RETURNING id, description AS title, TO_CHAR(created_at, 'DD Mon YYYY, hh:mi AM') AS date, amount, status, type`,
-      [userId, `+₹${parseFloat(amount).toFixed(2)}`]
+      [userId, amount]
     );
 
     const latestTxn = txnRes.rows[0];
 
-    // 3. Emit Socket.io Real-time update event to connected Android user
     io.to(`user_${userId}`).emit('wallet_updated', {
       balance: newBalance,
       latestTransaction: latestTxn,
@@ -162,6 +156,7 @@ app.post('/api/wallet/topup', async (req, res) => {
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phone_number, phone, role } = req.body;
   const targetPhone = phone_number || phone;
+  const targetRole = (role || 'rider').toLowerCase();
 
   if (!targetPhone) {
     return res.status(400).json({ error: 'Phone number is required' });
@@ -176,7 +171,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (phone_number) 
        DO UPDATE SET otp_code = $3, otp_expires_at = $4, role = COALESCE($2, users.role);`,
-      [targetPhone, role || 'RIDER', otp, expiresAt]
+      [targetPhone, targetRole, otp, expiresAt]
     );
 
     await sendSMS(targetPhone, otp);
@@ -213,7 +208,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       await pool.query('UPDATE users SET is_verified = true, otp_code = NULL WHERE id = $1', [user.id]);
     } else {
       const userRes = await pool.query('SELECT * FROM users WHERE phone_number = $1', [targetPhone]);
-      user = userRes.rows[0] || { id: 101, phone_number: targetPhone, role: 'RIDER' };
+      user = userRes.rows[0] || { id: 101, phone_number: targetPhone, role: 'rider' };
     }
 
     res.json({
@@ -265,8 +260,8 @@ app.post('/api/rides/complete', async (req, res) => {
     await pool.query("UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2", [driverEarnings, ride.driver_id]);
 
     await pool.query(
-      "INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES ($1, $2, 'credit', $3)",
-      [ride.driver_id, `+₹${driverEarnings}`, `Ride #${ride.ride_code} payout after 10% commission`]
+      "INSERT INTO wallet_transactions (user_id, amount, type, description, status) VALUES ($1, $2, 'credit', $3, 'Completed')",
+      [ride.driver_id, driverEarnings, `Ride #${ride.ride_code} payout after 10% commission`]
     );
 
     io.emit(`ride_status_${ride_id}`, { status: 'completed' });
@@ -296,7 +291,7 @@ app.post('/api/rides/cancel-by-driver', async (req, res) => {
       await pool.query('UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) - 100 WHERE id = $1', [driver_id]);
       await pool.query('UPDATE driver_profiles SET consecutive_cancellations = 0 WHERE user_id = $1', [driver_id]);
       await pool.query(
-        "INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES ($1, '-₹100.00', 'debit', 'Penalty: 5 consecutive ride cancellations')",
+        "INSERT INTO wallet_transactions (user_id, amount, type, description, status) VALUES ($1, 100.00, 'debit', 'Penalty: 5 consecutive ride cancellations', 'Completed')",
         [driver_id]
       );
       return res.json({ success: true, penaltyApplied: true, message: '₹100 Penalty charged for 5th cancellation' });
@@ -316,7 +311,7 @@ app.post('/api/sos/trigger', async (req, res) => {
   try {
     await pool.query(
       'INSERT INTO sos_alerts (ride_id, triggered_by_user_id, user_type, lat, lng) VALUES ($1, $2, $3, $4, $5)',
-      [ride_id, user_id, user_type, lat, lng]
+      [ride_id, user_id, user_type.toLowerCase(), lat, lng]
     );
 
     const adminPhone = process.env.ADMIN_EMERGENCY_PHONE || '9876543210';
@@ -427,7 +422,7 @@ app.patch('/api/admin/drivers/:id/verify', async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   try {
-    await pool.query('UPDATE driver_profiles SET verification_status = $1 WHERE id = $2', [status, id]);
+    await pool.query('UPDATE driver_profiles SET verification_status = $1 WHERE id = $2', [status.toLowerCase(), id]);
     io.emit('driver_verification_updated', { driverId: id, status });
     res.json({ success: true });
   } catch (err) {
@@ -515,7 +510,7 @@ app.get('/api/admin/support-tickets', async (req, res) => {
 
 app.get('/api/admin/profile', async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT full_name, email, phone_number, role FROM users WHERE role = 'admin' LIMIT 1");
+    const { rows } = await pool.query("SELECT id, full_name, email, phone_number, role FROM users WHERE role = 'admin' LIMIT 1");
     res.json(rows[0] || {});
   } catch (err) {
     res.json({});
@@ -523,11 +518,11 @@ app.get('/api/admin/profile', async (req, res) => {
 });
 
 app.put('/api/admin/profile', async (req, res) => {
-  const { fullName, email, phone } = req.body;
+  const { fullName, email, phone, adminId } = req.body;
   try {
     const { rows } = await pool.query(
-      "UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE role = 'admin' RETURNING full_name, email, phone_number;",
-      [fullName, email, phone]
+      "UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE id = $4 AND role = 'admin' RETURNING full_name, email, phone_number;",
+      [fullName, email, phone, adminId]
     );
     res.json({ success: true, user: rows[0] });
   } catch (err) {
