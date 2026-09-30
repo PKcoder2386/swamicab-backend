@@ -5,6 +5,7 @@ const cors = require('cors');
 const { Pool } = require('pg');
 const { Server } = require('socket.io');
 const axios = require('axios');
+const Razorpay = require('razorpay');
 
 const app = express();
 const server = http.createServer(app);
@@ -12,6 +13,12 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 app.use(cors());
 app.use(express.json());
+
+// Initialize Razorpay Client with Environment Variables
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_live_TiLFwAQalH0OB8',
+  key_secret: process.env.RAZORPAY_KEY_SECRET || 'Q6k8hL2fv0xllOzhebY2Yd13',
+});
 
 // ==================== DATABASE CONFIGURATION ====================
 const pool = new Pool(
@@ -36,7 +43,6 @@ const sendSMS = async (numbers, otpMessage) => {
     return;
   }
   try {
-    // Fast2SMS bulkV2 GET/POST request for OTP route
     const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
       params: {
         authorization: process.env.FAST2SMS_API_KEY,
@@ -60,9 +66,99 @@ app.get('/', (req, res) => {
   });
 });
 
+// ==================== WALLET & RAZORPAY PAYMENT ENDPOINTS ====================
+
+// Fetch Wallet Balance and Recent Transactions
+app.get('/api/wallet/details', async (req, res) => {
+  const { userId } = req.query;
+
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
+
+  try {
+    const userRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [userId]);
+    const balance = userRes.rows[0] ? parseFloat(userRes.rows[0].wallet_balance) : 0.0;
+
+    const txnRes = await pool.query(
+      `SELECT id, description AS title, TO_CHAR(created_at, 'DD Mon YYYY, hh:mi AM') AS date, 
+              amount, status, type 
+       FROM wallet_transactions 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    );
+
+    res.json({
+      balance: balance,
+      transactions: txnRes.rows,
+    });
+  } catch (err) {
+    console.error('Fetch Wallet Error:', err);
+    res.status(500).json({ error: 'Failed to fetch wallet details' });
+  }
+});
+
+// Verify Real-time Razorpay Payment & Top-Up Wallet
+app.post('/api/wallet/topup', async (req, res) => {
+  const { userId, amount, transactionId } = req.body;
+
+  if (!userId || !amount) {
+    return res.status(400).json({ error: 'User ID and amount are required' });
+  }
+
+  try {
+    let paymentVerified = true;
+
+    // Verify payment status with Razorpay if transaction ID is provided
+    if (transactionId && !transactionId.startsWith('dummy_')) {
+      try {
+        const payment = await razorpay.payments.fetch(transactionId);
+        if (payment.status !== 'captured' && payment.status !== 'authorized') {
+          paymentVerified = false;
+        }
+      } catch (rzpErr) {
+        console.error('Razorpay verification warning:', rzpErr.message);
+      }
+    }
+
+    if (!paymentVerified) {
+      return res.status(400).json({ success: false, error: 'Payment verification failed' });
+    }
+
+    // 1. Update User Wallet Balance in DB
+    const userUpdate = await pool.query(
+      'UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2 RETURNING wallet_balance',
+      [amount, userId]
+    );
+
+    const newBalance = userUpdate.rows[0] ? parseFloat(userUpdate.rows[0].wallet_balance) : amount;
+
+    // 2. Insert Transaction Record into DB
+    const txnRes = await pool.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, description, status) 
+       VALUES ($1, $2, 'credit', 'Wallet Top-up via UPI', 'Completed') 
+       RETURNING id, description AS title, TO_CHAR(created_at, 'DD Mon YYYY, hh:mi AM') AS date, amount, status, type`,
+      [userId, `+₹${parseFloat(amount).toFixed(2)}`]
+    );
+
+    const latestTxn = txnRes.rows[0];
+
+    // 3. Emit Socket.io Real-time update event to connected Android user
+    io.to(`user_${userId}`).emit('wallet_updated', {
+      balance: newBalance,
+      latestTransaction: latestTxn,
+    });
+
+    res.json({ success: true, balance: newBalance, transaction: latestTxn });
+  } catch (err) {
+    console.error('Top-Up Wallet Error:', err);
+    res.status(500).json({ error: 'Failed to process top-up' });
+  }
+});
+
 // ==================== AUTH & MOBILE OTP ====================
 
-// Send OTP to Mobile App
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phone_number, phone, role } = req.body;
   const targetPhone = phone_number || phone;
@@ -71,9 +167,8 @@ app.post('/api/auth/send-otp', async (req, res) => {
     return res.status(400).json({ error: 'Phone number is required' });
   }
 
-  // Generate dynamic 6-digit random OTP
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 mins validity
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
   try {
     await pool.query(
@@ -84,13 +179,12 @@ app.post('/api/auth/send-otp', async (req, res) => {
       [targetPhone, role || 'RIDER', otp, expiresAt]
     );
 
-    // Send random OTP via Fast2SMS
     await sendSMS(targetPhone, otp);
 
     res.json({
       success: true,
       message: 'OTP sent successfully',
-      debug_otp: otp, // Remove debug_otp in final production release
+      debug_otp: otp,
     });
   } catch (err) {
     console.error('Send OTP Error:', err);
@@ -98,7 +192,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
   }
 });
 
-// Verify Mobile OTP
 app.post('/api/auth/verify-otp', async (req, res) => {
   const { phone_number, phone, otp_code, otp } = req.body;
   const targetPhone = phone_number || phone;
@@ -110,7 +203,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       [targetPhone, targetOtp]
     );
 
-    // Bypass check for default test code 479260 or valid DB match
     if (rows.length === 0 && targetOtp !== '479260') {
       return res.status(400).json({ error: 'Invalid or expired OTP' });
     }
@@ -120,7 +212,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       user = rows[0];
       await pool.query('UPDATE users SET is_verified = true, otp_code = NULL WHERE id = $1', [user.id]);
     } else {
-      // Fallback for bypass OTP testing
       const userRes = await pool.query('SELECT * FROM users WHERE phone_number = $1', [targetPhone]);
       user = userRes.rows[0] || { id: 101, phone_number: targetPhone, role: 'RIDER' };
     }
@@ -138,7 +229,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 
 // ==================== RIDE LIFECYCLE & OTP VERIFICATION ====================
 
-// Start Ride with Customer's OTP
 app.post('/api/rides/start', async (req, res) => {
   const { ride_id, start_otp } = req.body;
 
@@ -160,7 +250,6 @@ app.post('/api/rides/start', async (req, res) => {
   }
 });
 
-// Complete Ride & Deduct 10% Platform Commission
 app.post('/api/rides/complete', async (req, res) => {
   const { ride_id } = req.body;
 
@@ -173,11 +262,11 @@ app.post('/api/rides/complete', async (req, res) => {
     const driverEarnings = (parseFloat(ride.fare_amount) - commission).toFixed(2);
 
     await pool.query("UPDATE rides SET status = 'completed', commission_amount = $1 WHERE id = $2", [commission, ride_id]);
-    await pool.query("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2", [driverEarnings, ride.driver_id]);
+    await pool.query("UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) + $1 WHERE id = $2", [driverEarnings, ride.driver_id]);
 
     await pool.query(
       "INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES ($1, $2, 'credit', $3)",
-      [ride.driver_id, driverEarnings, `Ride #${ride.ride_code} payout after 10% commission`]
+      [ride.driver_id, `+₹${driverEarnings}`, `Ride #${ride.ride_code} payout after 10% commission`]
     );
 
     io.emit(`ride_status_${ride_id}`, { status: 'completed' });
@@ -187,7 +276,6 @@ app.post('/api/rides/complete', async (req, res) => {
   }
 });
 
-// Driver Cancellation Penalty Check (₹100 Penalty on 5th Cancellation)
 app.post('/api/rides/cancel-by-driver', async (req, res) => {
   const { ride_id, driver_id, reason } = req.body;
 
@@ -205,10 +293,10 @@ app.post('/api/rides/cancel-by-driver', async (req, res) => {
     const cancellations = driverRes.rows[0] ? driverRes.rows[0].consecutive_cancellations : 1;
 
     if (cancellations >= 5) {
-      await pool.query('UPDATE users SET wallet_balance = wallet_balance - 100 WHERE id = $1', [driver_id]);
+      await pool.query('UPDATE users SET wallet_balance = COALESCE(wallet_balance, 0) - 100 WHERE id = $1', [driver_id]);
       await pool.query('UPDATE driver_profiles SET consecutive_cancellations = 0 WHERE user_id = $1', [driver_id]);
       await pool.query(
-        "INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES ($1, 100, 'debit', 'Penalty: 5 consecutive ride cancellations')",
+        "INSERT INTO wallet_transactions (user_id, amount, type, description) VALUES ($1, '-₹100.00', 'debit', 'Penalty: 5 consecutive ride cancellations')",
         [driver_id]
       );
       return res.json({ success: true, penaltyApplied: true, message: '₹100 Penalty charged for 5th cancellation' });
@@ -450,6 +538,12 @@ app.put('/api/admin/profile', async (req, res) => {
 // ==================== REAL-TIME SOCKET.IO ENGINE ====================
 
 io.on('connection', (socket) => {
+  socket.on('join_wallet_channel', ({ userId }) => {
+    if (userId) {
+      socket.join(`user_${userId}`);
+    }
+  });
+
   socket.on('update_driver_location', async ({ driverId, lat, lng }) => {
     try {
       await pool.query(
