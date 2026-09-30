@@ -13,13 +13,22 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.use(cors());
 app.use(express.json());
 
-const pool = new Pool({
-  user: process.env.PGUSER || 'postgres',
-  host: process.env.PGHOST || 'localhost',
-  database: process.env.PGDATABASE || 'swamicab_db',
-  password: process.env.PGPASSWORD || 'Pranit@2386',
-  port: process.env.PGPORT || 5432,
-});
+// ==================== DATABASE CONFIGURATION ====================
+// Uses DATABASE_URL provided by Render, with fallback to local settings
+const pool = new Pool(
+  process.env.DATABASE_URL
+    ? {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }, // Required for Render PostgreSQL
+      }
+    : {
+        user: process.env.PGUSER || 'postgres',
+        host: process.env.PGHOST || 'localhost',
+        database: process.env.PGDATABASE || 'swamicab_db',
+        password: process.env.PGPASSWORD || 'Pranit@2386',
+        port: process.env.PGPORT || 5432,
+      }
+);
 
 // Helper for Fast2SMS Gateway
 const sendSMS = async (numbers, message) => {
@@ -40,6 +49,15 @@ const sendSMS = async (numbers, message) => {
     console.error('SMS Gateway Error:', err.message);
   }
 };
+
+// ==================== HEALTH CHECK ROUTE ====================
+app.get('/', (req, res) => {
+  res.status(200).json({
+    status: 'success',
+    message: 'SwamiCab Production Backend API is live and running!',
+    timestamp: new Date()
+  });
+});
 
 // ==================== AUTH & MOBILE OTP ====================
 
@@ -65,6 +83,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
     res.json({ success: true, message: 'OTP sent successfully', debug_otp: otp });
   } catch (err) {
+    console.error('Send OTP Error:', err);
     res.status(500).json({ error: 'Failed to send OTP' });
   }
 });
