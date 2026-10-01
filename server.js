@@ -129,7 +129,6 @@ app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
 
   try {
-    // Role is only set on first signup. Existing users keep their role (prevents admin takeover).
     await pool.query(
       `INSERT INTO users (phone_number, role, otp_hash, otp_expires_at, otp_attempts)
        VALUES ($1, $2, $3, $4, 0)
@@ -449,6 +448,58 @@ app.get('/api/driver/wallet/summary', auth, driverOnly, async (req, res) => {
   }
 });
 
+// Direct Driver Wallet Top-Up Endpoint
+app.post('/api/driver/wallet/topup', auth, driverOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { amount, txnId, paymentMethod } = req.body;
+    const driverId = req.user.id;
+
+    if (!amount || Number(amount) <= 0) {
+      return res.status(400).json({ success: false, error: 'Invalid top-up amount' });
+    }
+
+    await client.query('BEGIN');
+
+    // 1. Update Driver Wallet Balance in Database
+    const walletRes = await client.query(
+      'UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 RETURNING wallet_balance',
+      [amount, driverId]
+    );
+
+    const newBalance = parseFloat(walletRes.rows[0].wallet_balance);
+
+    // 2. Save Transaction Log
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, description)
+       VALUES ($1, $2, 'credit', $3)`,
+      [driverId, amount, `Direct Top-Up (${paymentMethod || 'UPI'}) - Txn: ${txnId || 'N/A'}`]
+    );
+
+    await client.query('COMMIT');
+
+    // 3. Emit Socket event to driver app & owner dashboard
+    io.to(`driver_${driverId}`).emit('wallet_updated', {
+      balance: newBalance
+    });
+
+    io.emit('admin_driver_wallet_sync', {
+      driverId,
+      amount,
+      type: 'TOPUP',
+      newBalance
+    });
+
+    return res.json({ success: true, balance: newBalance });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Driver topup error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // Initiate Driver Wallet Top-Up (Razorpay)
 app.post('/api/driver/wallet/topup/initiate', auth, driverOnly, async (req, res) => {
   if (!razorpay) return res.status(503).json({ error: 'Payments gateway unconfigured' });
@@ -510,6 +561,104 @@ app.post('/api/driver/wallet/topup/verify', auth, driverOnly, async (req, res) =
     await client.query('ROLLBACK');
     console.error('Top-Up verification error:', err);
     res.status(500).json({ error: 'Failed to update wallet balance' });
+  } finally {
+    client.release();
+  }
+});
+
+// Ride Completion & Platform Fee Commission Deduction Endpoint
+app.post('/api/rides/complete', auth, driverOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { rideId, paymentMode, totalFare } = req.body;
+    const driverId = req.user.id;
+
+    // Calculate 10% Platform Fee
+    const platformFeePercent = 0.10;
+    const deductionAmount = totalFare * platformFeePercent; // e.g. ₹500 * 0.10 = ₹50
+    const driverNetEarnings = totalFare - deductionAmount;  // e.g. ₹450
+
+    await client.query('BEGIN');
+
+    // 1. Mark Ride as Completed
+    await client.query(
+      `UPDATE rides SET status = 'completed', completed_at = NOW() WHERE id = $1 AND driver_id = $2`,
+      [rideId, driverId]
+    );
+
+    // 2. Increment completed rides counter in driver_profiles
+    await client.query(
+      `UPDATE driver_profiles SET completed_rides = COALESCE(completed_rides, 0) + 1 WHERE user_id = $1`,
+      [driverId]
+    );
+
+    let walletRes;
+
+    if (paymentMode === 'CASH') {
+      // Deduct 10% commission directly from Driver's Prepaid Wallet
+      walletRes = await client.query(
+        `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 RETURNING wallet_balance`,
+        [deductionAmount, driverId]
+      );
+
+      // Record Wallet Transaction Log
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, amount, type, description)
+         VALUES ($1, $2, 'debit', $3)`,
+        [driverId, deductionAmount, `10% Platform Commission Fee for Ride #${rideId}`]
+      );
+
+    } else if (paymentMode === 'ONLINE') {
+      // Credit net earnings (90%) directly to driver wallet
+      walletRes = await client.query(
+        `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 RETURNING wallet_balance`,
+        [driverNetEarnings, driverId]
+      );
+
+      // Record Wallet Transaction Log
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, amount, type, description)
+         VALUES ($1, $2, 'credit', $3)`,
+        [driverId, driverNetEarnings, `Net Fare Payout for Ride #${rideId}`]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const updatedBalance = parseFloat(walletRes?.rows[0]?.wallet_balance || 0);
+
+    // 3. Socket Event: Update Driver App UI Live
+    io.to(`driver_${driverId}`).emit('wallet_updated', {
+      balance: updatedBalance,
+      latestDeduction: {
+        rideId,
+        fare: totalFare,
+        deduction: deductionAmount,
+        type: 'PLATFORM_FEE'
+      }
+    });
+
+    // 4. Socket Event: Sync Owner/Admin Dashboard Live
+    io.emit('admin_driver_wallet_sync', {
+      driverId,
+      rideId,
+      paymentMode,
+      fareCollected: totalFare,
+      commissionEarned: deductionAmount,
+      driverRemainingBalance: updatedBalance,
+      timestamp: new Date()
+    });
+
+    return res.json({
+      success: true,
+      message: "Ride completed successfully",
+      walletBalance: updatedBalance
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Ride completion error:', err);
+    return res.status(500).json({ success: false, message: err.message });
   } finally {
     client.release();
   }
@@ -759,33 +908,10 @@ io.on('connection', (socket) => {
       [ride_id, userId, String(otp)]
     );
     if (!rows.length) return socket.emit('ride_error', { error: 'Wrong start OTP' });
-    io.to(`ride_${ride_id}`).emit(`ride_status_${ride_id}`, { status: 'in_progress' });
-  });
-
-  // ---- Driver completes trip ----
-  socket.on('complete_ride', async ({ ride_id }) => {
-    if (role !== 'driver') return;
-    const { rows } = await pool.query(
-      `UPDATE rides SET status='completed', completed_at=NOW()
-       WHERE id=$1 AND driver_id=$2 AND status='in_progress' RETURNING *`,
-      [ride_id, userId]
-    );
-    if (!rows.length) return;
-    io.to(`ride_${ride_id}`).emit(`ride_status_${ride_id}`, { status: 'completed', ride: rows[0] });
-  });
-
-  // ---- Cancel ----
-  socket.on('cancel_ride', async ({ ride_id }) => {
-    const { rows } = await pool.query(
-      `UPDATE rides SET status='cancelled',
-         cancelled_by = CASE WHEN rider_id=$2 THEN 'rider' ELSE 'driver' END
-       WHERE id=$1 AND (rider_id=$2 OR driver_id=$2) AND status IN ('requested','accepted','arrived') RETURNING *`,
-      [ride_id, userId]
-    );
-    if (rows.length)
-      io.to(`ride_${ride_id}`).emit(`ride_status_${ride_id}`, { status: 'cancelled' });
+    io.to(`ride_${ride_id}`).emit(`ride_status_${ride_id}`, { status: 'in_progress', ride: rows[0] });
   });
 });
 
+// ==================== START SERVER ====================
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`SwamiCab backend running on port ${PORT}`));
+server.listen(PORT, () => console.log(`SwamiCab Server running on port ${PORT}`));
