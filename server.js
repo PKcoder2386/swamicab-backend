@@ -1,3 +1,4 @@
+name=server.js
 require('dotenv').config();
 const express = require('express');
 const http = require('http');
@@ -225,7 +226,14 @@ app.put('/api/user/profile/:id', auth, selfOrAdmin('id'), async (req, res) => {
       `UPDATE users SET full_name=$1, email=$2, dob=$3, gender=$4, emergency_contact=$5
        WHERE id=$6
        RETURNING id, full_name, email, phone_number, dob, gender, emergency_contact, role, wallet_balance, is_verified, created_at`,
-      [full_name, email || null, dob || null, gender, emergency_contact, req.params.id]
+      [
+        full_name || null,
+        email || null,
+        dob || null,
+        gender || null,
+        emergency_contact || null,
+        req.params.id,
+      ]
     );
     if (!rows.length) return res.status(404).json({ error: 'User not found' });
     io.to('admins').emit('user_profile_updated', rows[0]);
@@ -387,9 +395,9 @@ app.get('/api/driver/profile', auth, driverOnly, async (req, res) => {
         vehicle: {
           type: driver.vehicle_type || 'Cab',
           number: driver.vehicle_number || 'N/A',
-          model: driver.vehicle_model || 'Standard'
-        }
-      }
+          model: driver.vehicle_model || 'Standard',
+        },
+      },
     });
   } catch (err) {
     console.error('Driver profile error:', err);
@@ -421,7 +429,7 @@ app.get('/api/driver/earnings/summary', auth, driverOnly, async (req, res) => {
         grossFare: grossFare,
         platformFee: platformFee,
         completedRidesCount: completedCount,
-      }
+      },
     });
   } catch (err) {
     console.error('Earnings summary error:', err);
@@ -441,7 +449,7 @@ app.get('/api/driver/wallet/summary', auth, driverOnly, async (req, res) => {
     res.json({
       success: true,
       walletBalance: parseFloat(userQuery.rows[0]?.wallet_balance || 0),
-      transactions: txQuery.rows
+      transactions: txQuery.rows,
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch wallet summary' });
@@ -480,14 +488,14 @@ app.post('/api/driver/wallet/topup', auth, driverOnly, async (req, res) => {
 
     // 3. Emit Socket event to driver app & owner dashboard
     io.to(`driver_${driverId}`).emit('wallet_updated', {
-      balance: newBalance
+      balance: newBalance,
     });
 
     io.emit('admin_driver_wallet_sync', {
       driverId,
       amount,
       type: 'TOPUP',
-      newBalance
+      newBalance,
     });
 
     return res.json({ success: true, balance: newBalance });
@@ -513,7 +521,7 @@ app.post('/api/driver/wallet/topup/initiate', auth, driverOnly, async (req, res)
     const order = await razorpay.orders.create({
       amount: Math.round(amount * 100),
       currency: 'INR',
-      receipt: `topup_d${req.user.id}_${Date.now()}`
+      receipt: `topup_d${req.user.id}_${Date.now()}`,
     });
 
     res.json({ success: true, order, key_id: process.env.RAZORPAY_KEY_ID });
@@ -555,7 +563,7 @@ app.post('/api/driver/wallet/topup/verify', auth, driverOnly, async (req, res) =
 
     res.json({
       success: true,
-      newBalance: walletUpdate.rows[0].wallet_balance
+      newBalance: walletUpdate.rows[0].wallet_balance,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -575,16 +583,21 @@ app.post('/api/rides/complete', auth, driverOnly, async (req, res) => {
 
     // Calculate 10% Platform Fee
     const platformFeePercent = 0.10;
-    const deductionAmount = totalFare * platformFeePercent; // e.g. ₹500 * 0.10 = ₹50
-    const driverNetEarnings = totalFare - deductionAmount;  // e.g. ₹450
+    const deductionAmount = totalFare * platformFeePercent;
+    const driverNetEarnings = totalFare - deductionAmount;
 
     await client.query('BEGIN');
 
     // 1. Mark Ride as Completed
-    await client.query(
-      `UPDATE rides SET status = 'completed', completed_at = NOW() WHERE id = $1 AND driver_id = $2`,
+    const rideRes = await client.query(
+      `UPDATE rides SET status = 'completed', completed_at = NOW() WHERE id = $1 AND driver_id = $2 RETURNING *`,
       [rideId, driverId]
     );
+
+    if (!rideRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ success: false, message: 'Ride not found or unauthorized' });
+    }
 
     // 2. Increment completed rides counter in driver_profiles
     await client.query(
@@ -627,15 +640,17 @@ app.post('/api/rides/complete', auth, driverOnly, async (req, res) => {
 
     const updatedBalance = parseFloat(walletRes?.rows[0]?.wallet_balance || 0);
 
-    // 3. Socket Event: Update Driver App UI Live
+    // 3. Socket Event: Notify Room & Driver App
+    io.to(`ride_${rideId}`).emit(`ride_status_${rideId}`, { status: 'completed', ride: rideRes.rows[0] });
+
     io.to(`driver_${driverId}`).emit('wallet_updated', {
       balance: updatedBalance,
       latestDeduction: {
         rideId,
         fare: totalFare,
         deduction: deductionAmount,
-        type: 'PLATFORM_FEE'
-      }
+        type: 'PLATFORM_FEE',
+      },
     });
 
     // 4. Socket Event: Sync Owner/Admin Dashboard Live
@@ -646,13 +661,13 @@ app.post('/api/rides/complete', auth, driverOnly, async (req, res) => {
       fareCollected: totalFare,
       commissionEarned: deductionAmount,
       driverRemainingBalance: updatedBalance,
-      timestamp: new Date()
+      timestamp: new Date(),
     });
 
     return res.json({
       success: true,
-      message: "Ride completed successfully",
-      walletBalance: updatedBalance
+      message: 'Ride completed successfully',
+      walletBalance: updatedBalance,
     });
 
   } catch (err) {
