@@ -93,6 +93,8 @@ const auth = (req, res, next) => {
 };
 const adminOnly = (req, res, next) =>
   req.user?.role === 'admin' ? next() : res.status(403).json({ error: 'Admin only' });
+const driverOnly = (req, res, next) =>
+  req.user?.role === 'driver' ? next() : res.status(403).json({ error: 'Drivers only' });
 const selfOrAdmin = (paramName) => (req, res, next) =>
   String(req.user.id) === String(req.params[paramName]) || req.user.role === 'admin'
     ? next()
@@ -338,9 +340,8 @@ app.post('/api/support/ticket', auth, async (req, res) => {
   }
 });
 
-// ==================== DRIVER ====================
-app.post('/api/driver/vehicle', auth, async (req, res) => {
-  if (req.user.role !== 'driver') return res.status(403).json({ error: 'Drivers only' });
+// ==================== DRIVER SPECIFIC ENDPOINTS ====================
+app.post('/api/driver/vehicle', auth, driverOnly, async (req, res) => {
   const { vehicle_type, vehicle_number, vehicle_model, license_number } = req.body;
   try {
     const { rows } = await pool.query(
@@ -355,6 +356,162 @@ app.post('/api/driver/vehicle', auth, async (req, res) => {
     res.json({ success: true, profile: rows[0] });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save vehicle details' });
+  }
+});
+
+// Fetch Driver Profile
+app.get('/api/driver/profile', auth, driverOnly, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.full_name as name, u.phone_number as phone, u.email,
+              d.rating, d.completed_rides, d.vehicle_type, d.vehicle_number, d.vehicle_model,
+              d.verification_status, d.is_online
+       FROM users u
+       LEFT JOIN driver_profiles d ON u.id = d.user_id
+       WHERE u.id = $1`,
+      [req.user.id]
+    );
+
+    if (!rows.length) return res.status(404).json({ error: 'Driver profile not found' });
+
+    const driver = rows[0];
+    res.json({
+      success: true,
+      data: {
+        id: driver.id,
+        name: driver.name || 'Driver',
+        phone: driver.phone,
+        rating: parseFloat(driver.rating || 5.0),
+        completedRides: parseInt(driver.completed_rides || 0),
+        isOnline: driver.is_online || false,
+        verificationStatus: driver.verification_status || 'pending',
+        vehicle: {
+          type: driver.vehicle_type || 'Cab',
+          number: driver.vehicle_number || 'N/A',
+          model: driver.vehicle_model || 'Standard'
+        }
+      }
+    });
+  } catch (err) {
+    console.error('Driver profile error:', err);
+    res.status(500).json({ error: 'Failed to fetch driver profile' });
+  }
+});
+
+// Driver Daily Earnings Summary
+app.get('/api/driver/earnings/summary', auth, driverOnly, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT 
+         COALESCE(SUM(fare_amount), 0) AS total_gross,
+         COUNT(id) AS completed_count
+       FROM rides 
+       WHERE driver_id = $1 AND status = 'completed' AND DATE(completed_at) = CURRENT_DATE`,
+      [req.user.id]
+    );
+
+    const grossFare = parseFloat(rows[0].total_gross);
+    const completedCount = parseInt(rows[0].completed_count);
+    const platformFee = grossFare * 0.10; // 10% platform commission
+    const netEarnings = grossFare - platformFee;
+
+    res.json({
+      success: true,
+      data: {
+        totalEarnings: netEarnings,
+        grossFare: grossFare,
+        platformFee: platformFee,
+        completedRidesCount: completedCount,
+      }
+    });
+  } catch (err) {
+    console.error('Earnings summary error:', err);
+    res.status(500).json({ error: 'Failed to fetch earnings' });
+  }
+});
+
+// Driver Wallet Details & Transaction History
+app.get('/api/driver/wallet/summary', auth, driverOnly, async (req, res) => {
+  try {
+    const userQuery = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [req.user.id]);
+    const txQuery = await pool.query(
+      'SELECT id, amount, type, description, created_at FROM wallet_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50',
+      [req.user.id]
+    );
+
+    res.json({
+      success: true,
+      walletBalance: parseFloat(userQuery.rows[0]?.wallet_balance || 0),
+      transactions: txQuery.rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch wallet summary' });
+  }
+});
+
+// Initiate Driver Wallet Top-Up (Razorpay)
+app.post('/api/driver/wallet/topup/initiate', auth, driverOnly, async (req, res) => {
+  if (!razorpay) return res.status(503).json({ error: 'Payments gateway unconfigured' });
+
+  const amount = Number(req.body.amount);
+  if (!amount || amount < 100) {
+    return res.status(400).json({ error: 'Minimum top-up amount is ₹100' });
+  }
+
+  try {
+    const order = await razorpay.orders.create({
+      amount: Math.round(amount * 100),
+      currency: 'INR',
+      receipt: `topup_d${req.user.id}_${Date.now()}`
+    });
+
+    res.json({ success: true, order, key_id: process.env.RAZORPAY_KEY_ID });
+  } catch (err) {
+    console.error('Razorpay Order Error:', err);
+    res.status(500).json({ error: 'Failed to initiate top-up' });
+  }
+});
+
+// Verify Driver Top-Up Payment
+app.post('/api/driver/wallet/topup/verify', auth, driverOnly, async (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, amount } = req.body;
+
+  const expectedSignature = crypto
+    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || '')
+    .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+    .digest('hex');
+
+  if (expectedSignature !== razorpay_signature) {
+    return res.status(400).json({ error: 'Payment signature verification failed' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const walletUpdate = await client.query(
+      'UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 RETURNING wallet_balance',
+      [amount, req.user.id]
+    );
+
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, description)
+       VALUES ($1, $2, 'credit', $3)`,
+      [req.user.id, amount, `Wallet top-up via Payment ID: ${razorpay_payment_id}`]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      newBalance: walletUpdate.rows[0].wallet_balance
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Top-Up verification error:', err);
+    res.status(500).json({ error: 'Failed to update wallet balance' });
+  } finally {
+    client.release();
   }
 });
 
