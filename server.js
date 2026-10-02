@@ -21,6 +21,15 @@ const fs = require('fs');
   }
 });
 
+// Payout Configuration Credentials
+const CASHFREE_CLIENT_ID = process.env.CASHFREE_PAYOUT_CLIENT_ID || '';
+const CASHFREE_CLIENT_SECRET = process.env.CASHFREE_PAYOUT_CLIENT_SECRET || '';
+const CASHFREE_ENV = process.env.CASHFREE_ENV || 'SANDBOX'; // 'SANDBOX' or 'PRODUCTION'
+
+const RAZORPAYX_KEY_ID = process.env.RAZORPAYX_KEY_ID || '';
+const RAZORPAYX_KEY_SECRET = process.env.RAZORPAYX_KEY_SECRET || '';
+const RAZORPAYX_ACCOUNT_NUMBER = process.env.RAZORPAYX_ACCOUNT_NUMBER || '';
+
 const app = express();
 app.set('trust proxy', 1);
 const server = http.createServer(app);
@@ -52,6 +61,33 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
+
+// Auto-initialize required tables if missing
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS driver_bank_details (
+        driver_id VARCHAR(255) PRIMARY KEY,
+        account_holder_name VARCHAR(255),
+        account_number VARCHAR(100),
+        ifsc_code VARCHAR(20),
+        bank_name VARCHAR(100),
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS driver_withdrawals (
+        id SERIAL PRIMARY KEY,
+        driver_id VARCHAR(255) NOT NULL,
+        amount NUMERIC(10, 2) NOT NULL,
+        transfer_id VARCHAR(255) UNIQUE NOT NULL,
+        gateway_status VARCHAR(50) NOT NULL,
+        reference_id VARCHAR(255),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+  } catch (err) {
+    console.error('Error initializing payout database tables:', err.message);
+  }
+})();
 
 // Helper Logic
 const normalizePhone = (num) => String(num || '').replace(/\D/g, '').slice(-10);
@@ -337,6 +373,254 @@ app.get('/api/driver/incentives/summary', auth, driverOnly, async (req, res) => 
     res.status(500).json({ success: false, error: 'Failed to fetch incentive summary details' });
   }
 });
+
+// ==================== DRIVER BANK WITHDRAWAL ENDPOINT ====================
+
+app.post('/api/driver/incentives/withdraw', auth, driverOnly, async (req, res) => {
+  try {
+    const driverId = req.body.driverId || req.user.id;
+    const amount = parseFloat(req.body.amount);
+
+    if (!driverId || isNaN(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid withdrawal parameters or amount.'
+      });
+    }
+
+    const driver = await fetchDriverFromDB(driverId);
+
+    if (!driver) {
+      return res.status(404).json({
+        success: false,
+        message: 'Driver profile not found.'
+      });
+    }
+
+    if (!driver.bankDetails || !driver.bankDetails.accountNumber || !driver.bankDetails.ifscCode) {
+      return res.status(400).json({
+        success: false,
+        message: 'No bank account linked. Please update your Bank Details first.'
+      });
+    }
+
+    if (driver.withdrawableBalance < amount) {
+      return res.status(400).json({
+        success: false,
+        message: 'Insufficient balance available for withdrawal.'
+      });
+    }
+
+    const transferId = `TXN_WDR_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    let payoutResult = null;
+    const gatewayMode = process.env.PAYOUT_GATEWAY || 'MANUAL';
+
+    if (gatewayMode === 'CASHFREE') {
+      payoutResult = await processCashfreeDirectTransfer({ transferId, amount, driver });
+    } else if (gatewayMode === 'RAZORPAYX') {
+      payoutResult = await processRazorpayXPayout({ transferId, amount, driver });
+    } else {
+      payoutResult = {
+        success: true,
+        status: 'PENDING',
+        referenceId: transferId,
+        message: 'Withdrawal request logged successfully. Processing bank transfer.'
+      };
+    }
+
+    if (payoutResult.success) {
+      await deductDriverBalanceAndLog({
+        driverId,
+        amount,
+        transferId,
+        gatewayStatus: payoutResult.status,
+        referenceId: payoutResult.referenceId
+      });
+
+      // Emit real-time socket event to the driver's device
+      io.to(`driver_${driverId}`).emit('withdrawal_status_update', {
+        success: true,
+        transferId,
+        amount,
+        status: payoutResult.status
+      });
+
+      const accLastFour = driver.bankDetails.accountNumber.slice(-4);
+      return res.status(200).json({
+        success: true,
+        message: payoutResult.message || `Transfer of ₹${amount} initiated to A/C ending with ${accLastFour}`,
+        data: {
+          transferId,
+          amount,
+          status: payoutResult.status
+        }
+      });
+    } else {
+      return res.status(500).json({
+        success: false,
+        message: payoutResult.message || 'Payout gateway failed to process bank transfer.'
+      });
+    }
+  } catch (error) {
+    console.error('Error during bank withdrawal execution:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error occurred while processing withdrawal.'
+    });
+  }
+});
+
+// ==================== PAYOUT GATEWAY HELPERS ====================
+
+async function processCashfreeDirectTransfer({ transferId, amount, driver }) {
+  try {
+    const baseUrl = CASHFREE_ENV === 'PRODUCTION'
+      ? 'https://payout-api.cashfree.com'
+      : 'https://payout-gamma.cashfree.com';
+
+    const payload = {
+      amount: amount,
+      transferId: transferId,
+      transferMode: 'imps',
+      beneDetails: {
+        name: driver.fullName,
+        phone: driver.phone || '9999999999',
+        email: driver.email || 'driver@swamicab.com',
+        bankAccount: driver.bankDetails.accountNumber,
+        ifsc: driver.bankDetails.ifscCode
+      }
+    };
+
+    const response = await axios.post(`${baseUrl}/payout/v1/directTransfer`, payload, {
+      headers: {
+        'X-Client-Id': CASHFREE_CLIENT_ID,
+        'X-Client-Secret': CASHFREE_CLIENT_SECRET,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (response.data && (response.data.status === 'SUCCESS' || response.data.status === 'PENDING')) {
+      return {
+        success: true,
+        status: response.data.status,
+        referenceId: response.data.data ? response.data.data.referenceId : transferId,
+        message: response.data.message
+      };
+    }
+
+    return { success: false, message: response.data.message || 'Cashfree transfer failed.' };
+  } catch (err) {
+    console.error('Cashfree Payout Error:', err.response ? err.response.data : err.message);
+    return { success: false, message: 'Cashfree API request rejected.' };
+  }
+}
+
+async function processRazorpayXPayout({ transferId, amount, driver }) {
+  try {
+    const authHeader = Buffer.from(`${RAZORPAYX_KEY_ID}:${RAZORPAYX_KEY_SECRET}`).toString('base64');
+
+    const payload = {
+      account_number: RAZORPAYX_ACCOUNT_NUMBER,
+      amount: Math.round(amount * 100), // convert to paise
+      currency: 'INR',
+      mode: 'IMPS',
+      purpose: 'payout',
+      fund_account: {
+        account_type: 'bank_account',
+        bank_account: {
+          name: driver.fullName,
+          ifsc: driver.bankDetails.ifscCode,
+          account_number: driver.bankDetails.accountNumber
+        },
+        contact: {
+          name: driver.fullName,
+          type: 'employee',
+          contact: driver.phone
+        }
+      },
+      notes: {
+        transferId: transferId,
+        driverId: driver.id
+      }
+    };
+
+    const response = await axios.post('https://api.razorpay.com/v1/payouts', payload, {
+      headers: {
+        'Authorization': `Basic ${authHeader}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (response.data && response.data.id) {
+      return {
+        success: true,
+        status: response.data.status,
+        referenceId: response.data.id,
+        message: 'Payout successfully submitted to RazorpayX.'
+      };
+    }
+
+    return { success: false, message: 'RazorpayX payout error.' };
+  } catch (err) {
+    console.error('RazorpayX Error:', err.response ? err.response.data : err.message);
+    return { success: false, message: 'RazorpayX API execution failed.' };
+  }
+}
+
+async function fetchDriverFromDB(driverId) {
+  const userRes = await pool.query(
+    `SELECT u.id, u.full_name, u.phone_number, u.email, u.wallet_balance,
+            bd.account_number, bd.ifsc_code, bd.account_holder_name
+     FROM users u
+     LEFT JOIN driver_bank_details bd ON u.id::text = bd.driver_id::text
+     WHERE u.id::text = $1::text`,
+    [driverId]
+  );
+
+  if (!userRes.rows.length) return null;
+
+  const row = userRes.rows[0];
+  return {
+    id: row.id,
+    fullName: row.full_name || 'SwamiCab Driver',
+    phone: row.phone_number,
+    email: row.email,
+    withdrawableBalance: parseFloat(row.wallet_balance || 0.0),
+    bankDetails: row.account_number && row.ifsc_code ? {
+      accountNumber: row.account_number,
+      ifscCode: row.ifsc_code,
+      accountHolderName: row.account_holder_name || row.full_name
+    } : null
+  };
+}
+
+async function deductDriverBalanceAndLog({ driverId, amount, transferId, gatewayStatus, referenceId }) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    await client.query(
+      `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id::text = $2::text`,
+      [amount, driverId]
+    );
+
+    await client.query(
+      `INSERT INTO driver_withdrawals (driver_id, amount, transfer_id, gateway_status, reference_id)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [driverId, amount, transferId, gatewayStatus, referenceId]
+    );
+
+    await client.query('COMMIT');
+    console.log(`[DB UPDATED] Deducted ₹${amount} for Driver ${driverId}. Txn: ${transferId}, Status: ${gatewayStatus}`);
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Failed DB transaction during withdrawal deduction:', err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 // ==================== DRIVER DOCUMENT UPLOADS & STATUS ====================
 
