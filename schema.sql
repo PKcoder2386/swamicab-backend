@@ -1,4 +1,4 @@
--- Core Users Table (Updated with extended personal information fields)
+-- Core Users Table
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     phone_number VARCHAR(15) UNIQUE NOT NULL,
@@ -9,7 +9,9 @@ CREATE TABLE IF NOT EXISTS users (
     emergency_contact VARCHAR(15),
     role VARCHAR(20) CHECK (role IN ('rider', 'driver', 'admin')) DEFAULT 'rider',
     otp_code VARCHAR(6),
+    otp_hash VARCHAR(255),
     otp_expires_at TIMESTAMP,
+    otp_attempts INT DEFAULT 0,
     is_verified BOOLEAN DEFAULT FALSE,
     wallet_balance NUMERIC(10,2) DEFAULT 0.00,
     rating NUMERIC(3,2) DEFAULT 5.00,
@@ -24,6 +26,8 @@ CREATE TABLE IF NOT EXISTS driver_profiles (
     vehicle_number VARCHAR(50),
     vehicle_type VARCHAR(30) DEFAULT 'Sedan',
     verification_status VARCHAR(20) CHECK (verification_status IN ('pending', 'approved', 'rejected')) DEFAULT 'pending',
+    approval_status VARCHAR(20) DEFAULT 'pending',
+    rating NUMERIC(3,2) DEFAULT 5.00,
     is_online BOOLEAN DEFAULT FALSE,
     consecutive_cancellations INT DEFAULT 0,
     current_lat NUMERIC(10,8),
@@ -75,7 +79,11 @@ CREATE TABLE IF NOT EXISTS rides (
     dropoff_lat NUMERIC(10,8),
     dropoff_lng NUMERIC(11,8),
     fare_amount NUMERIC(10,2) NOT NULL,
+    total_fare NUMERIC(10,2) DEFAULT 0.00,
     commission_amount NUMERIC(10,2) DEFAULT 0.00,
+    distance_km NUMERIC(8,2) DEFAULT 0.00,
+    incentive_amount NUMERIC(10,2) DEFAULT 0.00,
+    surge_amount NUMERIC(10,2) DEFAULT 0.00,
     status VARCHAR(20) CHECK (status IN ('requested', 'accepted', 'arrived', 'in_progress', 'completed', 'cancelled')) DEFAULT 'requested',
     start_otp VARCHAR(4),
     cancelled_by VARCHAR(10) CHECK (cancelled_by IN ('rider', 'driver')),
@@ -125,3 +133,53 @@ CREATE TABLE IF NOT EXISTS sos_alerts (
     status VARCHAR(20) DEFAULT 'ACTIVE',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Driver Document Upload Management
+CREATE TABLE IF NOT EXISTS driver_documents (
+    id SERIAL PRIMARY KEY,
+    driver_id INT UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    dl_url TEXT,
+    rc_url TEXT,
+    insurance_url TEXT,
+    aadhaar_url TEXT,
+    vehicle_photos_url TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Driver Incentive Quests
+CREATE TABLE IF NOT EXISTS driver_incentive_quests (
+    id SERIAL PRIMARY KEY,
+    driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+    week_start_date DATE NOT NULL,
+    completed_trips INT DEFAULT 0,
+    target_trips INT DEFAULT 50,
+    current_bonus NUMERIC(10,2) DEFAULT 0.00,
+    total_surge_earned NUMERIC(10,2) DEFAULT 0.00,
+    peak_hours_logged NUMERIC(5,2) DEFAULT 0.00,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Driver Bonus Logs
+CREATE TABLE IF NOT EXISTS driver_bonus_logs (
+    id SERIAL PRIMARY KEY,
+    driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+    title VARCHAR(150) NOT NULL,
+    amount NUMERIC(10,2) NOT NULL,
+    type VARCHAR(50) DEFAULT 'bonus',
+    date_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Wallet Deductions
+CREATE TABLE IF NOT EXISTS wallet_deductions (
+    id SERIAL PRIMARY KEY,
+    driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+    ride_id INT REFERENCES rides(id) ON DELETE SET NULL,
+    platform_fee_amount NUMERIC(10,2) NOT NULL,
+    description TEXT,
+    date_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Performance Optimization Indexes
+CREATE INDEX IF NOT EXISTS idx_rides_driver_status ON rides(driver_id, status);
+CREATE INDEX IF NOT EXISTS idx_driver_quests_date ON driver_incentive_quests(driver_id, week_start_date);
+CREATE INDEX IF NOT EXISTS idx_wallet_deductions_driver ON wallet_deductions(driver_id);
