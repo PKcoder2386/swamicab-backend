@@ -513,6 +513,11 @@ io.on('connection', (socket) => {
   });
 });
 
+// <-- ADD THIS ROOT ROUTE HERE -->
+app.get('/', (req, res) => {
+  res.json({ success: true, message: 'SwamiCab Backend API is live and running smoothly!' });
+});
+
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`SwamiCab Backend Active Engine running on port ${PORT}`);
