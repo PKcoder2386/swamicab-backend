@@ -13,14 +13,16 @@ const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
 
-// Initialize Firebase Admin SDK with safe fallback & parsing
+// Initialize Firebase Admin SDK safely
 try {
   let serviceAccount;
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     let rawEnv = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
     serviceAccount = JSON.parse(rawEnv);
-  } else {
+  } else if (fs.existsSync('./serviceAccountKey.json')) {
     serviceAccount = require('./serviceAccountKey.json');
+  } else {
+    throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is missing and serviceAccountKey.json not found locally.');
   }
 
   if (!admin.apps.length) {
