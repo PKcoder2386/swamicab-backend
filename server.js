@@ -13,18 +13,29 @@ const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
 
-// Initialize Firebase Admin SDK using Base64 environment variable safely
+// Initialize Firebase Admin SDK safely (handles both Base64 and raw JSON)
 try {
   let serviceAccount;
-
   const envVar = process.env.FIREBASE_SERVICE_ACCOUNT;
-  if (envVar && typeof envVar === 'string' && envVar.trim().length > 10) {
-    // Decode from Base64 back to JSON string, then parse
-    const jsonString = Buffer.from(envVar.trim(), 'base64').toString('utf8');
-    serviceAccount = JSON.parse(jsonString);
-    console.log('Successfully decoded Firebase credentials from Base64 environment variable.');
+
+  if (envVar && typeof envVar === 'string' && envVar.trim().length > 0) {
+    const cleanedEnv = envVar.trim();
+    
+    // Check if it's Base64 encoded (Base64 strings usually don't start with '{')
+    if (!cleanedEnv.startsWith('{')) {
+      // Decode from Base64
+      const jsonString = Buffer.from(cleanedEnv, 'base64').toString('utf8');
+      serviceAccount = JSON.parse(jsonString);
+      console.log('Successfully decoded Firebase credentials from Base64 env var.');
+    } else {
+      // Parse as raw JSON directly
+      serviceAccount = JSON.parse(cleanedEnv);
+      console.log('Successfully parsed Firebase credentials from raw JSON env var.');
+    }
   } else {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is missing or invalid.');
+    // Local fallback if running locally
+    serviceAccount = require('./serviceAccountKey.json');
+    console.log('Loaded Firebase credentials from local file.');
   }
 
   if (!admin.apps.length) {
@@ -37,7 +48,6 @@ try {
   console.error('Fatal Error: Failed to initialize Firebase Admin SDK:', err.message);
   process.exit(1);
 }
-
 // Verify Essential Environment Variables
 ['JWT_SECRET', 'DATABASE_URL'].forEach((key) => {
   if (!process.env[key]) {
