@@ -13,16 +13,22 @@ const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
 
-// Initialize Firebase Admin SDK safely
+// Initialize Firebase Admin SDK safely with explicit logging
 try {
   let serviceAccount;
+  
+  console.log('Checking FIREBASE_SERVICE_ACCOUNT env var existence:', !!process.env.FIREBASE_SERVICE_ACCOUNT);
+
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    let rawEnv = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
+    let rawEnv = typeof process.env.FIREBASE_SERVICE_ACCOUNT === 'string' 
+      ? process.env.FIREBASE_SERVICE_ACCOUNT.trim() 
+      : JSON.stringify(process.env.FIREBASE_SERVICE_ACCOUNT);
+    
     serviceAccount = JSON.parse(rawEnv);
-  } else if (fs.existsSync('./serviceAccountKey.json')) {
+  } else if (fs.existsSync(path.join(__dirname, 'serviceAccountKey.json'))) {
     serviceAccount = require('./serviceAccountKey.json');
   } else {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is missing and serviceAccountKey.json not found locally.');
+    throw new Error('CRITICAL: FIREBASE_SERVICE_ACCOUNT environment variable is missing or empty in Render dashboard!');
   }
 
   if (!admin.apps.length) {
