@@ -23,30 +23,42 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('CRITICAL UNHANDLED REJECTION at:', promise, 'reason:', reason);
   process.exit(1);
 });
-// Initialize Firebase Admin SDK safely from environment variable
+// Initialize Firebase Admin SDK with absolute bulletproof fallbacks
 try {
-  let serviceAccount;
+  let serviceAccount = null;
   const envVar = process.env.FIREBASE_SERVICE_ACCOUNT;
 
   if (envVar && typeof envVar === 'string' && envVar.trim().length > 0) {
-    let cleanedEnv = envVar.trim();
-    // If it's base64 encoded
-    if (!cleanedEnv.startsWith('{')) {
-      cleanedEnv = Buffer.from(cleanedEnv, 'base64').toString('utf8');
+    try {
+      let cleanedEnv = envVar.trim();
+      if (!cleanedEnv.startsWith('{')) {
+        cleanedEnv = Buffer.from(cleanedEnv, 'base64').toString('utf8');
+      }
+      serviceAccount = JSON.parse(cleanedEnv);
+      console.log('Successfully parsed Firebase credentials from env var.');
+    } catch (parseErr) {
+      console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:', parseErr.message);
     }
-    serviceAccount = JSON.parse(cleanedEnv);
-    console.log('Successfully parsed Firebase credentials from env var.');
-  } else {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is missing.');
   }
 
-  // Ensure private_key has correct newline formatting
-  if (serviceAccount.private_key) {
+  // Fallback: If env var failed or wasn't provided, try loading local file safely
+  if (!serviceAccount) {
+    const localKeyPath = path.join(__dirname, 'serviceAccountKey.json');
+    if (fs.existsSync(localKeyPath)) {
+      serviceAccount = require('./serviceAccountKey.json');
+      console.log('Loaded Firebase credentials from local serviceAccountKey.json fallback.');
+    }
+  }
+
+  if (!serviceAccount) {
+    throw new Error('Could not load Firebase credentials from environment variables or local files.');
+  }
+
+  // Ensure private_key exists and has correct newline formatting
+  if (serviceAccount.private_key && typeof serviceAccount.private_key === 'string') {
     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-  }
-
-  if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
-    throw new Error('Service account object is missing required fields (project_id, private_key, or client_email).');
+  } else {
+    throw new Error('Service account is missing a valid private_key string.');
   }
 
   if (!admin.apps.length) {
