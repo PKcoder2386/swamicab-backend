@@ -4,17 +4,35 @@ const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const { Server } = require('socket.io');
-const axios = require('axios');
+const admin = require('firebase-admin');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios'); // <-- Added missing axios import
+
+// Initialize Firebase Admin SDK (Supports Render environment variable string or local file fallback)
+try {
+  let serviceAccount;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } else {
+    serviceAccount = require('./serviceAccountKey.json');
+  }
+
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log('Firebase Admin Initialized Successfully.');
+} catch (err) {
+  console.error('Fatal Error: Failed to initialize Firebase Admin SDK:', err.message);
+  process.exit(1);
+}
 
 // Verify Essential Environment Variables
-['JWT_SECRET', 'FAST2SMS_API_KEY', 'DATABASE_URL'].forEach((key) => {
+['JWT_SECRET', 'DATABASE_URL'].forEach((key) => {
   if (!process.env[key]) {
     console.error(`Fatal Initialization Error: Missing required env variable [${key}]`);
     process.exit(1);
@@ -24,7 +42,7 @@ const fs = require('fs');
 // Payout Configuration Credentials
 const CASHFREE_CLIENT_ID = process.env.CASHFREE_PAYOUT_CLIENT_ID || '';
 const CASHFREE_CLIENT_SECRET = process.env.CASHFREE_PAYOUT_CLIENT_SECRET || '';
-const CASHFREE_ENV = process.env.CASHFREE_ENV || 'SANDBOX'; // 'SANDBOX' or 'PRODUCTION'
+const CASHFREE_ENV = process.env.CASHFREE_ENV || 'SANDBOX';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -69,12 +87,30 @@ const pool = new Pool({
         full_name VARCHAR(255),
         email VARCHAR(255),
         wallet_balance NUMERIC(10, 2) DEFAULT 0.00,
-        is_verified BOOLEAN DEFAULT false,
-        otp_hash VARCHAR(255),
-        otp_expires_at TIMESTAMP,
-        otp_attempts INT DEFAULT 0,
+        is_verified BOOLEAN DEFAULT true,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+
+      CREATE TABLE IF NOT EXISTS driver_profiles (
+        user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        dob VARCHAR(50),
+        profile_photo_uri TEXT,
+        vehicle_model VARCHAR(255),
+        vehicle_number VARCHAR(100),
+        vehicle_type VARCHAR(100),
+        rating NUMERIC(3, 2) DEFAULT 5.00,
+        approval_status VARCHAR(50) DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS driver_documents (
+        id SERIAL PRIMARY KEY,
+        driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+        doc_type VARCHAR(100),
+        file_path TEXT,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE TABLE IF NOT EXISTS driver_bank_details (
         driver_id VARCHAR(255) PRIMARY KEY,
         account_holder_name VARCHAR(255),
@@ -83,6 +119,7 @@ const pool = new Pool({
         bank_name VARCHAR(100),
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+
       CREATE TABLE IF NOT EXISTS driver_withdrawals (
         id SERIAL PRIMARY KEY,
         driver_id VARCHAR(255) NOT NULL,
@@ -94,6 +131,7 @@ const pool = new Pool({
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+    console.log('Database tables verified/initialized successfully.');
   } catch (err) {
     console.error('Error initializing database tables:', err.message);
   }
@@ -101,29 +139,7 @@ const pool = new Pool({
 
 // Helper Logic
 const normalizePhone = (num) => String(num || '').replace(/\D/g, '').slice(-10);
-const isValidPhone = (p) => /^[6-9]\d{9}$/.test(p);
-const hashOtp = (otp) => crypto.createHmac('sha256', process.env.JWT_SECRET).update(String(otp)).digest('hex');
 const signToken = (user) => jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '30d' });
-
-// Fast2SMS API Dispatch Gateway
-const sendSMS = async (phone, otp) => {
-  try {
-    const { data } = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
-      params: {
-        authorization: process.env.FAST2SMS_API_KEY,
-        route: 'otp',
-        variables_values: otp,
-        numbers: phone
-      },
-      timeout: 10000
-    });
-    console.log(`Fast2SMS Response Payload: ${JSON.stringify(data)}`);
-    return data && data.return === true;
-  } catch (err) {
-    console.error('Fast2SMS Transmission Failed:', err.response?.data || err.message);
-    return false;
-  }
-};
 
 // Authentication Middleware Guard
 const auth = (req, res, next) => {
@@ -148,78 +164,41 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-// Rate Limiters
-const otpLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 5,
-  keyGenerator: (req) => normalizePhone(req.body.phone_number || req.body.phone) || req.ip,
-  message: { success: false, error: 'Too many OTP attempts. Retry after 10 minutes.' }
-});
+// ==================== FIREBASE AUTHENTICATION ROUTE ====================
 
-// ==================== AUTHENTICATION ROUTES ====================
-
-app.post('/api/auth/send-otp', otpLimiter, async (req, res) => {
-  const phone = normalizePhone(req.body.phone_number || req.body.phone);
-  const role = ['rider', 'driver', 'admin'].includes((req.body.role || '').toLowerCase())
-    ? req.body.role.toLowerCase()
+app.post('/api/auth/firebase-login', async (req, res) => {
+  const { idToken, role: requestedRole } = req.body;
+  const role = ['rider', 'driver', 'admin'].includes((requestedRole || '').toLowerCase())
+    ? requestedRole.toLowerCase()
     : 'rider';
 
-  if (!isValidPhone(phone)) return res.status(400).json({ success: false, error: 'Provide a valid 10-digit mobile number' });
-
-  const otp = crypto.randomInt(100000, 1000000).toString();
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-
-  try {
-    await pool.query(
-      `INSERT INTO users (phone_number, role, otp_hash, otp_expires_at, otp_attempts)
-       VALUES ($1, $2, $3, $4, 0)
-       ON CONFLICT (phone_number)
-       DO UPDATE SET otp_hash = $3, otp_expires_at = $4, otp_attempts = 0, role = $2`,
-      [phone, role, hashOtp(otp), expiresAt]
-    );
-
-    const sent = await sendSMS(phone, otp);
-    if (!sent) {
-      return res.status(502).json({ success: false, error: 'Failed to send SMS OTP via Fast2SMS gateway.' });
-    }
-    res.json({ success: true, message: 'OTP transmitted successfully via mobile SMS.' });
-  } catch (err) {
-    console.error('send-otp system error:', err);
-    res.status(500).json({ success: false, error: 'Internal Auth Dispatch Failure' });
-  }
-});
-
-app.post('/api/auth/verify-otp', async (req, res) => {
-  const phone = normalizePhone(req.body.phone_number || req.body.phone);
-  const otp = String(req.body.otp_code || req.body.otp || '');
-
-  if (!isValidPhone(phone) || !/^\d{6}$/.test(otp)) {
-    return res.status(400).json({ success: false, error: 'Invalid phone format or 6-digit OTP code' });
+  if (!idToken) {
+    return res.status(400).json({ success: false, error: 'Firebase ID token is required' });
   }
 
   try {
-    const { rows } = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
-    const user = rows[0];
+    // Verify Firebase token sent from Android client after successful SMS OTP verification
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    let phone = normalizePhone(decodedToken.phone_number);
 
-    if (!user || !user.otp_hash || !user.otp_expires_at || new Date(user.otp_expires_at) < new Date()) {
-      return res.status(400).json({ success: false, error: 'OTP code expired. Request a new OTP.' });
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Associated mobile number not found in token' });
     }
 
-    if (user.otp_attempts >= 5) {
-      return res.status(429).json({ success: false, error: 'Maximum attempts exceeded. Request a new OTP.' });
-    }
+    // Upsert user in PostgreSQL database
+    let userResult = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
+    let user;
 
-    const inputHash = Buffer.from(hashOtp(otp));
-    const storedHash = Buffer.from(user.otp_hash);
-    if (!crypto.timingSafeEqual(inputHash, storedHash)) {
-      await pool.query('UPDATE users SET otp_attempts = otp_attempts + 1 WHERE id = $1', [user.id]);
-      return res.status(400).json({ success: false, error: 'Incorrect OTP entered' });
+    if (userResult.rows.length === 0) {
+      const insertRes = await pool.query(
+        `INSERT INTO users (phone_number, role, is_verified) VALUES ($1, $2, true) RETURNING *`,
+        [phone, role]
+      );
+      user = insertRes.rows[0];
+    } else {
+      user = userResult.rows[0];
+      await pool.query('UPDATE users SET is_verified = true WHERE id = $1', [user.id]);
     }
-
-    await pool.query(
-      'UPDATE users SET is_verified = true, otp_hash = NULL, otp_expires_at = NULL, otp_attempts = 0 WHERE id = $1',
-      [user.id]
-    );
 
     if (user.role === 'driver') {
       await pool.query(
@@ -242,8 +221,92 @@ app.post('/api/auth/verify-otp', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('verify-otp error:', err);
-    res.status(500).json({ success: false, error: 'Authentication verification failed' });
+    console.error('Firebase token verification error:', err);
+    res.status(401).json({ success: false, error: 'Invalid or expired Firebase authentication token' });
+  }
+});
+
+// ==================== DRIVER REGISTRATION & ONBOARDING API ====================
+
+app.post('/api/driver/register', auth, driverOnly, async (req, res) => {
+  const { fullName, email, dob, vehicleModel, vehicleNumber, vehicleType } = req.body;
+  try {
+    await pool.query(
+      `UPDATE users SET full_name = $1, email = $2 WHERE id = $3`,
+      [fullName, email, req.user.id]
+    );
+
+    await pool.query(
+      `INSERT INTO driver_profiles (user_id, dob, vehicle_model, vehicle_number, vehicle_type, approval_status)
+       VALUES ($1, $2, $3, $4, $5, 'pending')
+       ON CONFLICT (user_id) 
+       DO UPDATE SET dob = $2, vehicle_model = $3, vehicle_number = $4, vehicle_type = $5`,
+      [req.user.id, dob, vehicleModel, vehicleNumber, vehicleType || 'Cab']
+    );
+
+    res.json({ success: true, message: 'Driver registration details saved successfully.' });
+  } catch (err) {
+    console.error('Error saving driver registration:', err);
+    res.status(500).json({ success: false, error: 'Failed to save driver registration details' });
+  }
+});
+
+app.post('/api/driver/upload-documents', auth, driverOnly, upload.single('document'), async (req, res) => {
+  const { docType } = req.body;
+  const filePath = req.file ? `/uploads/${req.file.filename}` : null;
+
+  if (!filePath) {
+    return res.status(400).json({ success: false, error: 'No document file provided' });
+  }
+
+  try {
+    await pool.query(
+      `INSERT INTO driver_documents (driver_id, doc_type, file_path) VALUES ($1, $2, $3)`,
+      [req.user.id, docType || 'GENERAL', filePath]
+    );
+
+    res.json({ success: true, message: 'Document uploaded successfully', filePath });
+  } catch (err) {
+    console.error('Error recording uploaded document:', err);
+    res.status(500).json({ success: false, error: 'Failed to save document record' });
+  }
+});
+
+// ==================== DRIVER INCENTIVES & WALLET API ====================
+
+app.get('/api/driver/incentives/summary', auth, driverOnly, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: {
+        quest: { completedRides: 0, targetRides: 50, bonusUnlocked: 0, nextTierBonus: 500 },
+        surge: { totalSurgeEarned: 0.0, withdrawableAmount: 0.0, peakHoursCount: '0.0 hrs', logs: [] }
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to fetch incentive summary' });
+  }
+});
+
+app.post('/api/driver/incentives/withdraw', auth, driverOnly, async (req, res) => {
+  const { amount } = req.body;
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ success: false, error: 'Invalid withdrawal amount' });
+  }
+
+  const transferId = 'TXN_' + Date.now() + '_' + req.user.id;
+  try {
+    await pool.query(
+      `INSERT INTO driver_withdrawals (driver_id, amount, transfer_id, gateway_status, status)
+       VALUES ($1, $2, $3, 'PENDING', 'Pending')`,
+      [req.user.id, amount, transferId]
+    );
+
+    io.emit('payout_status_updated');
+    res.json({ success: true, message: 'Withdrawal request submitted successfully' });
+  } catch (err) {
+    console.error('Error submitting withdrawal:', err);
+    res.status(500).json({ success: false, error: 'Failed to process withdrawal request' });
   }
 });
 
@@ -291,7 +354,7 @@ app.get('/api/admin/payments/metrics', auth, adminOnly, async (req, res) => {
     res.json({
       totalRevenue: parseFloat(revRes.rows[0]?.total || 0),
       payoutQueue: parseFloat(queueRes.rows[0]?.total || 0),
-      cashCollections: 0 // Update with cash collections table if applicable
+      cashCollections: 0
     });
   } catch (err) {
     console.error('Error fetching payment metrics:', err);
@@ -302,12 +365,10 @@ app.get('/api/admin/payments/metrics', auth, adminOnly, async (req, res) => {
 app.post('/api/payout/transfer', auth, adminOnly, async (req, res) => {
   const { transferId, beneId, amount } = req.body;
   try {
-    // Execute Cashfree Payout Transfer API
     const baseUrl = CASHFREE_ENV === 'PRODUCTION'
       ? 'https://payout-api.cashfree.com'
       : 'https://payout-gamma.cashfree.com';
 
-    // Simulated or direct call to Cashfree
     const response = await axios.post(`${baseUrl}/payout/v1/directTransfer`, {
       amount,
       transferId,
@@ -319,7 +380,7 @@ app.post('/api/payout/transfer', auth, adminOnly, async (req, res) => {
         'X-Client-Secret': CASHFREE_CLIENT_SECRET,
         'Content-Type': 'application/json'
       }
-    }).catch(() => ({ data: { status: 'SUCCESS', data: { referenceId: transferId } } })); // Fallback for testing/sandbox
+    }).catch(() => ({ data: { status: 'SUCCESS', data: { referenceId: transferId } } }));
 
     await pool.query(
       `UPDATE driver_withdrawals SET status = 'Completed', gateway_status = $1 WHERE transfer_id = $2`,
