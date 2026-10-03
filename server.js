@@ -23,33 +23,24 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('CRITICAL UNHANDLED REJECTION at:', promise, 'reason:', reason);
   process.exit(1);
 });
-
-// Initialize Firebase Admin SDK safely with private key formatting check
+// Initialize Firebase Admin SDK safely from environment variable
 try {
   let serviceAccount;
   const envVar = process.env.FIREBASE_SERVICE_ACCOUNT;
 
   if (envVar && typeof envVar === 'string' && envVar.trim().length > 0) {
-    const cleanedEnv = envVar.trim();
+    let cleanedEnv = envVar.trim();
+    // If it's base64 encoded
     if (!cleanedEnv.startsWith('{')) {
-      const jsonString = Buffer.from(cleanedEnv, 'base64').toString('utf8');
-      serviceAccount = JSON.parse(jsonString);
-      console.log('Successfully decoded Firebase credentials from Base64 env var.');
-    } else {
-      serviceAccount = JSON.parse(cleanedEnv);
-      console.log('Successfully parsed Firebase credentials from raw JSON env var.');
+      cleanedEnv = Buffer.from(cleanedEnv, 'base64').toString('utf8');
     }
+    serviceAccount = JSON.parse(cleanedEnv);
+    console.log('Successfully parsed Firebase credentials from env var.');
   } else {
-    const localKeyPath = path.join(__dirname, 'serviceAccountKey.json');
-    if (fs.existsSync(localKeyPath)) {
-      serviceAccount = require('./serviceAccountKey.json');
-      console.log('Loaded Firebase credentials from local file.');
-    } else {
-      throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is missing and local serviceAccountKey.json not found.');
-    }
+    throw new Error('FIREBASE_SERVICE_ACCOUNT environment variable is missing.');
   }
 
-  // Ensure private_key has correct formatting (newlines fixed if pasted as a single line)
+  // Ensure private_key has correct newline formatting
   if (serviceAccount.private_key) {
     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
   }
