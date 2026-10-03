@@ -24,15 +24,31 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
-// Initialize Firebase Admin SDK with a triple-layer bulletproof loader
+// Initialize Firebase Admin SDK with bulletproof optional chaining and safety checks
 try {
   let serviceAccount = null;
-  const envVar = process.env.FIREBASE_SERVICE_ACCOUNT;
 
-  // Method 1: Check FIREBASE_SERVICE_ACCOUNT (JSON or Base64)
-  if (envVar && typeof envVar === 'string' && envVar.trim().length > 0) {
+  const projectId = process.env.FIREBASE_PROJECT_ID?.trim();
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL?.trim();
+  let privateKey = process.env.FIREBASE_PRIVATE_KEY?.trim();
+  const envVar = process.env.FIREBASE_SERVICE_ACCOUNT?.trim();
+
+  // Method 1: Check individual environment variables (Recommended for Render)
+  if (projectId && clientEmail && privateKey) {
+    if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+      privateKey = privateKey.slice(1, -1);
+    }
+    serviceAccount = {
+      project_id: projectId,
+      client_email: clientEmail,
+      private_key: privateKey.replace(/\\n/g, '\n')
+    };
+    console.log('Loaded Firebase credentials from individual environment variables.');
+  } 
+  // Method 2: Check FIREBASE_SERVICE_ACCOUNT JSON blob or base64 string
+  else if (envVar && envVar.length > 0) {
     try {
-      let cleanedEnv = envVar.trim();
+      let cleanedEnv = envVar;
       if (!cleanedEnv.startsWith('{')) {
         cleanedEnv = Buffer.from(cleanedEnv, 'base64').toString('utf8');
       }
@@ -40,18 +56,6 @@ try {
       console.log('Successfully parsed Firebase credentials from FIREBASE_SERVICE_ACCOUNT env var.');
     } catch (parseErr) {
       console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:', parseErr.message);
-    }
-  }
-
-  // Method 2: Check individual environment variables (Best for Render to avoid text clipping)
-  if (!serviceAccount || !serviceAccount.private_key) {
-    if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
-      serviceAccount = {
-        project_id: process.env.FIREBASE_PROJECT_ID,
-        client_email: process.env.FIREBASE_CLIENT_EMAIL,
-        private_key: process.env.FIREBASE_PRIVATE_KEY
-      };
-      console.log('Loaded Firebase credentials from individual environment variables.');
     }
   }
 
@@ -64,18 +68,16 @@ try {
     }
   }
 
-  if (!serviceAccount) {
-    throw new Error('Could not load Firebase credentials. Please configure FIREBASE_SERVICE_ACCOUNT or individual Firebase environment variables.');
+  if (!serviceAccount || !serviceAccount.project_id || !serviceAccount.private_key) {
+    throw new Error('Could not load Firebase credentials. Please configure FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY.');
   }
 
-  // Ensure private_key exists and has correct newline formatting
-  if (serviceAccount.private_key && typeof serviceAccount.private_key === 'string') {
+  // Ensure private_key has correct newline formatting
+  if (typeof serviceAccount.private_key === 'string') {
     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-  } else {
-    throw new Error('Service account is missing a valid private_key string.');
   }
 
-  if (!admin.apps.length) {
+  if (!admin.apps?.length) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
     });
