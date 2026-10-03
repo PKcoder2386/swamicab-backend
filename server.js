@@ -11,20 +11,23 @@ const admin = require('firebase-admin');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const axios = require('axios'); // <-- Added missing axios import
+const axios = require('axios');
 
-// Initialize Firebase Admin SDK (Supports Render environment variable string or local file fallback)
+// Initialize Firebase Admin SDK with safe fallback & parsing
 try {
   let serviceAccount;
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    let rawEnv = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
+    serviceAccount = JSON.parse(rawEnv);
   } else {
     serviceAccount = require('./serviceAccountKey.json');
   }
 
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
+  if (!admin.apps.length) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+  }
   console.log('Firebase Admin Initialized Successfully.');
 } catch (err) {
   console.error('Fatal Error: Failed to initialize Firebase Admin SDK:', err.message);
@@ -177,7 +180,6 @@ app.post('/api/auth/firebase-login', async (req, res) => {
   }
 
   try {
-    // Verify Firebase token sent from Android client after successful SMS OTP verification
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     let phone = normalizePhone(decodedToken.phone_number);
 
@@ -185,7 +187,6 @@ app.post('/api/auth/firebase-login', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Associated mobile number not found in token' });
     }
 
-    // Upsert user in PostgreSQL database
     let userResult = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
     let user;
 
