@@ -13,22 +13,18 @@ const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
 
-// Initialize Firebase Admin SDK safely with explicit logging
+// Initialize Firebase Admin SDK safely
 try {
   let serviceAccount;
-  
-  console.log('Checking FIREBASE_SERVICE_ACCOUNT env var existence:', !!process.env.FIREBASE_SERVICE_ACCOUNT);
 
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    let rawEnv = typeof process.env.FIREBASE_SERVICE_ACCOUNT === 'string' 
-      ? process.env.FIREBASE_SERVICE_ACCOUNT.trim() 
-      : JSON.stringify(process.env.FIREBASE_SERVICE_ACCOUNT);
-    
-    serviceAccount = JSON.parse(rawEnv);
-  } else if (fs.existsSync(path.join(__dirname, 'serviceAccountKey.json'))) {
-    serviceAccount = require('./serviceAccountKey.json');
+  // Safely check if the env var exists as a non-empty string without crashing
+  const envVar = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (envVar && typeof envVar === 'string' && envVar.trim().length > 5) {
+    serviceAccount = JSON.parse(envVar.trim());
+    console.log('Loaded Firebase credentials from Render environment variables.');
   } else {
-    throw new Error('CRITICAL: FIREBASE_SERVICE_ACCOUNT environment variable is missing or empty in Render dashboard!');
+    serviceAccount = require('./serviceAccountKey.json');
+    console.log('Loaded Firebase credentials from local serviceAccountKey.json file.');
   }
 
   if (!admin.apps.length) {
