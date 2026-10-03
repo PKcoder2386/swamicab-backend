@@ -23,11 +23,13 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('CRITICAL UNHANDLED REJECTION at:', promise, 'reason:', reason);
   process.exit(1);
 });
-// Initialize Firebase Admin SDK with absolute bulletproof fallbacks
+
+// Initialize Firebase Admin SDK with a triple-layer bulletproof loader
 try {
   let serviceAccount = null;
   const envVar = process.env.FIREBASE_SERVICE_ACCOUNT;
 
+  // Method 1: Check FIREBASE_SERVICE_ACCOUNT (JSON or Base64)
   if (envVar && typeof envVar === 'string' && envVar.trim().length > 0) {
     try {
       let cleanedEnv = envVar.trim();
@@ -35,13 +37,25 @@ try {
         cleanedEnv = Buffer.from(cleanedEnv, 'base64').toString('utf8');
       }
       serviceAccount = JSON.parse(cleanedEnv);
-      console.log('Successfully parsed Firebase credentials from env var.');
+      console.log('Successfully parsed Firebase credentials from FIREBASE_SERVICE_ACCOUNT env var.');
     } catch (parseErr) {
       console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:', parseErr.message);
     }
   }
 
-  // Fallback: If env var failed or wasn't provided, try loading local file safely
+  // Method 2: Check individual environment variables (Best for Render to avoid text clipping)
+  if (!serviceAccount || !serviceAccount.private_key) {
+    if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+      serviceAccount = {
+        project_id: process.env.FIREBASE_PROJECT_ID,
+        client_email: process.env.FIREBASE_CLIENT_EMAIL,
+        private_key: process.env.FIREBASE_PRIVATE_KEY
+      };
+      console.log('Loaded Firebase credentials from individual environment variables.');
+    }
+  }
+
+  // Method 3: Local file fallback
   if (!serviceAccount) {
     const localKeyPath = path.join(__dirname, 'serviceAccountKey.json');
     if (fs.existsSync(localKeyPath)) {
@@ -51,7 +65,7 @@ try {
   }
 
   if (!serviceAccount) {
-    throw new Error('Could not load Firebase credentials from environment variables or local files.');
+    throw new Error('Could not load Firebase credentials. Please configure FIREBASE_SERVICE_ACCOUNT or individual Firebase environment variables.');
   }
 
   // Ensure private_key exists and has correct newline formatting
