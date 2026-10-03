@@ -24,7 +24,7 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
-// Initialize Firebase Admin SDK with bulletproof optional chaining and safety checks
+// Initialize Firebase Admin SDK directly using modular imports to prevent undefined properties
 try {
   let serviceAccount = null;
 
@@ -77,9 +77,11 @@ try {
     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
   }
 
-  if (!admin.apps?.length) {
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
+  const { initializeApp, cert, getApps } = require('firebase-admin/app');
+
+  if (!getApps().length) {
+    initializeApp({
+      credential: cert(serviceAccount)
     });
   }
   console.log('Firebase Admin Initialized Successfully.');
