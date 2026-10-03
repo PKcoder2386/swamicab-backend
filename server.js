@@ -24,7 +24,7 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
-// Initialize Firebase Admin SDK safely with full debugging and fallbacks
+// Initialize Firebase Admin SDK safely with private key formatting check
 try {
   let serviceAccount;
   const envVar = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -49,8 +49,10 @@ try {
     }
   }
 
-  // Debug: Print available keys to verify structure
-  console.log('Available keys in serviceAccount:', Object.keys(serviceAccount || {}));
+  // Ensure private_key has correct formatting (newlines fixed if pasted as a single line)
+  if (serviceAccount.private_key) {
+    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+  }
 
   if (!serviceAccount.project_id || !serviceAccount.private_key || !serviceAccount.client_email) {
     throw new Error('Service account object is missing required fields (project_id, private_key, or client_email).');
