@@ -190,8 +190,9 @@ app.post('/api/auth/send-otp', async (req, res) => {
       res.status(400).json({ success: false, error: response.data.message || 'Failed to dispatch SMS via Fast2SMS' });
     }
   } catch (err) {
-    console.error('Fast2SMS dispatch error:', err.message);
-    res.status(500).json({ success: false, error: 'Internal server error while sending OTP' });
+    const detailedError = err.response?.data?.message || err.message || 'Internal server error while sending OTP';
+    console.error('Fast2SMS dispatch error:', detailedError);
+    res.status(500).json({ success: false, error: detailedError });
   }
 });
 
