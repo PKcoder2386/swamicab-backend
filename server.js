@@ -174,11 +174,11 @@ app.post('/api/auth/send-otp', async (req, res) => {
   otpStorage[phone] = otp;
 
   try {
-    // Real-time SMS dispatch via Fast2SMS OTP route using paid account balance
+    // Real-time SMS dispatch via Fast2SMS Quick SMS route (route: 'q')
     const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
       params: {
-        route: 'otp',
-        variables_values: otp,
+        route: 'q',
+        message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
         numbers: phone
       },
       headers: {
