@@ -1,18 +1,18 @@
 -- Core Users Table
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
-    phone_number VARCHAR(15) UNIQUE NOT NULL,
-    full_name VARCHAR(100),
-    email VARCHAR(100) UNIQUE,
-    dob DATE,
+    phone_number VARCHAR(20) UNIQUE NOT NULL,
+    full_name VARCHAR(255),
+    email VARCHAR(255) UNIQUE,
+    dob VARCHAR(50),
     gender VARCHAR(20),
-    emergency_contact VARCHAR(15),
+    emergency_contact VARCHAR(20),
     role VARCHAR(20) CHECK (role IN ('rider', 'driver', 'admin')) DEFAULT 'rider',
     otp_code VARCHAR(6),
     otp_hash VARCHAR(255),
     otp_expires_at TIMESTAMP,
     otp_attempts INT DEFAULT 0,
-    is_verified BOOLEAN DEFAULT FALSE,
+    is_verified BOOLEAN DEFAULT TRUE,
     wallet_balance NUMERIC(10,2) DEFAULT 0.00,
     rating NUMERIC(3,2) DEFAULT 5.00,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -20,19 +20,52 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Driver Profile & Verification
 CREATE TABLE IF NOT EXISTS driver_profiles (
-    id SERIAL PRIMARY KEY,
-    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    dob VARCHAR(50),
+    profile_photo_uri TEXT,
     license_number VARCHAR(50),
-    vehicle_number VARCHAR(50),
-    vehicle_type VARCHAR(30) DEFAULT 'Sedan',
+    vehicle_model VARCHAR(255),
+    vehicle_number VARCHAR(100),
+    vehicle_type VARCHAR(100) DEFAULT 'Cab',
     verification_status VARCHAR(20) CHECK (verification_status IN ('pending', 'approved', 'rejected')) DEFAULT 'pending',
-    approval_status VARCHAR(20) DEFAULT 'pending',
+    approval_status VARCHAR(50) DEFAULT 'pending',
     rating NUMERIC(3,2) DEFAULT 5.00,
     is_online BOOLEAN DEFAULT FALSE,
     consecutive_cancellations INT DEFAULT 0,
     current_lat NUMERIC(10,8),
     current_lng NUMERIC(11,8),
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Driver Document Upload Management (Aligned with server.js dynamic uploads)
+CREATE TABLE IF NOT EXISTS driver_documents (
+    id SERIAL PRIMARY KEY,
+    driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+    doc_type VARCHAR(100),
+    file_path TEXT,
+    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Driver Bank Details (For Payouts)
+CREATE TABLE IF NOT EXISTS driver_bank_details (
+    driver_id VARCHAR(255) PRIMARY KEY,
+    account_holder_name VARCHAR(255),
+    account_number VARCHAR(100),
+    ifsc_code VARCHAR(20),
+    bank_name VARCHAR(100),
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Driver Withdrawals / Payouts Queue
+CREATE TABLE IF NOT EXISTS driver_withdrawals (
+    id SERIAL PRIMARY KEY,
+    driver_id VARCHAR(255) NOT NULL,
+    amount NUMERIC(10, 2) NOT NULL,
+    transfer_id VARCHAR(255) UNIQUE NOT NULL,
+    gateway_status VARCHAR(50) NOT NULL,
+    reference_id VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'Pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Saved Places (Home, Work, Favorites)
@@ -132,18 +165,6 @@ CREATE TABLE IF NOT EXISTS sos_alerts (
     lng NUMERIC(11,8),
     status VARCHAR(20) DEFAULT 'ACTIVE',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Driver Document Upload Management
-CREATE TABLE IF NOT EXISTS driver_documents (
-    id SERIAL PRIMARY KEY,
-    driver_id INT UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-    dl_url TEXT,
-    rc_url TEXT,
-    insurance_url TEXT,
-    aadhaar_url TEXT,
-    vehicle_photos_url TEXT,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Driver Incentive Quests

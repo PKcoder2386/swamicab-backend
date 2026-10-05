@@ -7,7 +7,6 @@ const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const { Server } = require('socket.io');
-const admin = require('firebase-admin');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -24,75 +23,8 @@ process.on('unhandledRejection', (reason, promise) => {
   process.exit(1);
 });
 
-// Initialize Firebase Admin SDK directly using modular imports to prevent undefined properties
-try {
-  let serviceAccount = null;
-
-  const projectId = process.env.FIREBASE_PROJECT_ID?.trim();
-  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL?.trim();
-  let privateKey = process.env.FIREBASE_PRIVATE_KEY?.trim();
-  const envVar = process.env.FIREBASE_SERVICE_ACCOUNT?.trim();
-
-  // Method 1: Check individual environment variables (Recommended for Render)
-  if (projectId && clientEmail && privateKey) {
-    if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
-      privateKey = privateKey.slice(1, -1);
-    }
-    serviceAccount = {
-      project_id: projectId,
-      client_email: clientEmail,
-      private_key: privateKey.replace(/\\n/g, '\n')
-    };
-    console.log('Loaded Firebase credentials from individual environment variables.');
-  } 
-  // Method 2: Check FIREBASE_SERVICE_ACCOUNT JSON blob or base64 string
-  else if (envVar && envVar.length > 0) {
-    try {
-      let cleanedEnv = envVar;
-      if (!cleanedEnv.startsWith('{')) {
-        cleanedEnv = Buffer.from(cleanedEnv, 'base64').toString('utf8');
-      }
-      serviceAccount = JSON.parse(cleanedEnv);
-      console.log('Successfully parsed Firebase credentials from FIREBASE_SERVICE_ACCOUNT env var.');
-    } catch (parseErr) {
-      console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT JSON:', parseErr.message);
-    }
-  }
-
-  // Method 3: Local file fallback
-  if (!serviceAccount) {
-    const localKeyPath = path.join(__dirname, 'serviceAccountKey.json');
-    if (fs.existsSync(localKeyPath)) {
-      serviceAccount = require('./serviceAccountKey.json');
-      console.log('Loaded Firebase credentials from local serviceAccountKey.json fallback.');
-    }
-  }
-
-  if (!serviceAccount || !serviceAccount.project_id || !serviceAccount.private_key) {
-    throw new Error('Could not load Firebase credentials. Please configure FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY.');
-  }
-
-  // Ensure private_key has correct newline formatting
-  if (typeof serviceAccount.private_key === 'string') {
-    serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-  }
-
-  const { initializeApp, cert, getApps } = require('firebase-admin/app');
-
-  if (!getApps().length) {
-    initializeApp({
-      credential: cert(serviceAccount)
-    });
-  }
-  console.log('Firebase Admin Initialized Successfully.');
-} catch (err) {
-  console.error('FATAL FIREBASE INIT ERROR:', err.message);
-  console.error('Full Error Stack:', err.stack);
-  process.exit(1);
-}
-
 // Verify Essential Environment Variables
-['JWT_SECRET', 'DATABASE_URL'].forEach((key) => {
+['JWT_SECRET', 'DATABASE_URL', 'FAST2SMS_API_KEY'].forEach((key) => {
   if (!process.env[key]) {
     console.error(`Fatal Initialization Error: Missing required env variable [${key}]`);
     process.exit(1);
@@ -224,64 +156,101 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-// ==================== FIREBASE AUTHENTICATION ROUTE ====================
+// Temporary in-memory OTP store (Clears upon successful verification or server restart)
+const otpStorage = {};
 
-app.post('/api/auth/firebase-login', async (req, res) => {
-  const { idToken, role: requestedRole } = req.body;
+// ==================== FAST2SMS CUSTOM OTP ROUTES ====================
+
+app.post('/api/auth/send-otp', async (req, res) => {
+  const { phoneNumber } = req.body;
+  const phone = normalizePhone(phoneNumber);
+
+  if (!phone || phone.length !== 10) {
+    return res.status(400).json({ success: false, error: 'Valid 10-digit mobile number required' });
+  }
+
+  // Generate a random 6-digit OTP code
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  otpStorage[phone] = otp;
+
+  try {
+    // Send via Fast2SMS API
+    const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
+      params: {
+        authorization: process.env.FAST2SMS_API_KEY,
+        variables_values: otp,
+        route: 'otp',
+        numbers: phone
+      }
+    });
+
+    if (response.data && response.data.return) {
+      res.status(200).json({ success: true, message: 'OTP sent successfully to mobile' });
+    } else {
+      res.status(400).json({ success: false, error: response.data.message || 'Failed to dispatch SMS via Fast2SMS' });
+    }
+  } catch (err) {
+    console.error('Fast2SMS dispatch error:', err.message);
+    res.status(500).json({ success: false, error: 'Internal server error while sending OTP' });
+  }
+});
+
+app.post('/api/auth/verify-otp', async (req, res) => {
+  const { phoneNumber, otp, role: requestedRole } = req.body;
+  const phone = normalizePhone(phoneNumber);
   const role = ['rider', 'driver', 'admin'].includes((requestedRole || '').toLowerCase())
     ? requestedRole.toLowerCase()
     : 'rider';
 
-  if (!idToken) {
-    return res.status(400).json({ success: false, error: 'Firebase ID token is required' });
+  if (!phone || !otp) {
+    return res.status(400).json({ success: false, error: 'Phone number and OTP are required' });
   }
 
-  try {
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    let phone = normalizePhone(decodedToken.phone_number);
+  if (otpStorage[phone] && otpStorage[phone] === otp) {
+    delete otpStorage[phone]; // Clear OTP after single use
 
-    if (!phone) {
-      return res.status(400).json({ success: false, error: 'Associated mobile number not found in token' });
-    }
+    try {
+      let userResult = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
+      let user;
 
-    let userResult = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
-    let user;
-
-    if (userResult.rows.length === 0) {
-      const insertRes = await pool.query(
-        `INSERT INTO users (phone_number, role, is_verified) VALUES ($1, $2, true) RETURNING *`,
-        [phone, role]
-      );
-      user = insertRes.rows[0];
-    } else {
-      user = userResult.rows[0];
-      await pool.query('UPDATE users SET is_verified = true WHERE id = $1', [user.id]);
-    }
-
-    if (user.role === 'driver') {
-      await pool.query(
-        `INSERT INTO driver_profiles (user_id, approval_status)
-         VALUES ($1, 'pending')
-         ON CONFLICT (user_id) DO NOTHING`,
-        [user.id]
-      );
-    }
-
-    res.json({
-      success: true,
-      token: signToken(user),
-      user: {
-        id: user.id,
-        phone_number: user.phone_number,
-        role: user.role,
-        full_name: user.full_name,
-        email: user.email
+      if (userResult.rows.length === 0) {
+        const insertRes = await pool.query(
+          `INSERT INTO users (phone_number, role, is_verified) VALUES ($1, $2, true) RETURNING *`,
+          [phone, role]
+        );
+        user = insertRes.rows[0];
+      } else {
+        user = userResult.rows[0];
+        await pool.query('UPDATE users SET is_verified = true WHERE id = $1', [user.id]);
       }
-    });
-  } catch (err) {
-    console.error('Firebase token verification error:', err);
-    res.status(401).json({ success: false, error: 'Invalid or expired Firebase authentication token' });
+
+      if (user.role === 'driver') {
+        await pool.query(
+          `INSERT INTO driver_profiles (user_id, approval_status)
+           VALUES ($1, 'pending')
+           ON CONFLICT (user_id) DO NOTHING`,
+          [user.id]
+        );
+      }
+
+      return res.json({
+        success: true,
+        token: signToken(user),
+        user: {
+          id: user.id,
+          phone_number: user.phone_number,
+          role: user.role,
+          full_name: user.full_name,
+          email: user.email
+        }
+      });
+    } catch (dbErr) {
+      console.error('Database user resolution error after OTP verification:', dbErr);
+      return res.status(500).json({ success: false, error: 'Database error processing user session' });
+    }
   }
+
+  res.status(400).json({ success: false, error: 'Invalid or expired OTP code' });
 });
 
 // ==================== DRIVER REGISTRATION & ONBOARDING API ====================
@@ -513,7 +482,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// <-- ADD THIS ROOT ROUTE HERE -->
 app.get('/', (req, res) => {
   res.json({ success: true, message: 'SwamiCab Backend API is live and running smoothly!' });
 });
