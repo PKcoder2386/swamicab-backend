@@ -159,7 +159,7 @@ const adminOnly = (req, res, next) => {
 // Temporary in-memory OTP store (Clears upon successful verification or server restart)
 const otpStorage = {};
 
-// ==================== FAST2SMS CUSTOM OTP ROUTES ====================
+// ==================== FAST2SMS REAL-TIME OTP ROUTES ====================
 
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phoneNumber } = req.body;
@@ -174,7 +174,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
   otpStorage[phone] = otp;
 
   try {
-    // Using Quick SMS route ('q') with header authorization to bypass DLT template rejections during testing
+    // Real-time SMS dispatch via Fast2SMS Quick route
     const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
       params: {
         route: 'q',
@@ -187,10 +187,10 @@ app.post('/api/auth/send-otp', async (req, res) => {
     });
 
     if (response.data && response.data.return) {
-      res.status(200).json({ success: true, message: 'OTP sent successfully' });
+      return res.status(200).json({ success: true, message: 'OTP sent successfully to your mobile' });
     } else {
       const apiMsg = response.data?.message || 'Failed to send SMS via Fast2SMS';
-      res.status(400).json({ success: false, error: Array.isArray(apiMsg) ? apiMsg.join(', ') : apiMsg });
+      return res.status(400).json({ success: false, error: Array.isArray(apiMsg) ? apiMsg.join(', ') : apiMsg });
     }
   } catch (err) {
     let errorMsg = 'Internal server error while sending OTP';
@@ -209,7 +209,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
     }
     
     console.error('Fast2SMS dispatch error:', errorMsg);
-    res.status(500).json({ success: false, error: errorMsg });
+    return res.status(500).json({ success: false, error: errorMsg });
   }
 });
 
@@ -436,7 +436,7 @@ app.post('/api/payout/transfer', auth, adminOnly, async (req, res) => {
     res.json({ success: true, referenceId: response.data?.data?.referenceId || transferId });
   } catch (err) {
     console.error('Payout transfer execution error:', err);
-    res.status(500).json({ success: false, error: 'Failed to execute payout transfer' });
+    res.status(550).json({ success: false, error: 'Failed to execute payout transfer' });
   }
 });
 
