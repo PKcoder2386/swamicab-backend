@@ -174,25 +174,42 @@ app.post('/api/auth/send-otp', async (req, res) => {
   otpStorage[phone] = otp;
 
   try {
-    // Send via Fast2SMS API
+    // Using Quick SMS route ('q') with header authorization to bypass DLT template rejections during testing
     const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
       params: {
-        authorization: process.env.FAST2SMS_API_KEY,
-        variables_values: otp,
-        route: 'otp',
+        route: 'q',
+        message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
         numbers: phone
+      },
+      headers: {
+        authorization: process.env.FAST2SMS_API_KEY
       }
     });
 
     if (response.data && response.data.return) {
-      res.status(200).json({ success: true, message: 'OTP sent successfully to mobile' });
+      res.status(200).json({ success: true, message: 'OTP sent successfully' });
     } else {
-      res.status(400).json({ success: false, error: response.data.message || 'Failed to dispatch SMS via Fast2SMS' });
+      const apiMsg = response.data?.message || 'Failed to send SMS via Fast2SMS';
+      res.status(400).json({ success: false, error: Array.isArray(apiMsg) ? apiMsg.join(', ') : apiMsg });
     }
   } catch (err) {
-    const detailedError = err.response?.data?.message || err.message || 'Internal server error while sending OTP';
-    console.error('Fast2SMS dispatch error:', detailedError);
-    res.status(500).json({ success: false, error: detailedError });
+    let errorMsg = 'Internal server error while sending OTP';
+    if (err.response && err.response.data) {
+      if (typeof err.response.data === 'string') {
+        errorMsg = err.response.data;
+      } else if (err.response.data.message) {
+        errorMsg = Array.isArray(err.response.data.message) 
+          ? err.response.data.message.join(', ') 
+          : err.response.data.message;
+      } else {
+        errorMsg = JSON.stringify(err.response.data);
+      }
+    } else if (err.message) {
+      errorMsg = err.message;
+    }
+    
+    console.error('Fast2SMS dispatch error:', errorMsg);
+    res.status(500).json({ success: false, error: errorMsg });
   }
 });
 
