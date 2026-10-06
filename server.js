@@ -41,6 +41,9 @@ app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
+// Make io accessible to routes via app
+app.set('socketio', io);
+
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -67,67 +70,6 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
-
-// Auto-initialize required tables if missing
-(async () => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        phone_number VARCHAR(20) UNIQUE NOT NULL,
-        role VARCHAR(20) DEFAULT 'rider',
-        full_name VARCHAR(255),
-        email VARCHAR(255),
-        wallet_balance NUMERIC(10, 2) DEFAULT 0.00,
-        is_verified BOOLEAN DEFAULT true,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS driver_profiles (
-        user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        dob VARCHAR(50),
-        profile_photo_uri TEXT,
-        vehicle_model VARCHAR(255),
-        vehicle_number VARCHAR(100),
-        vehicle_type VARCHAR(100),
-        rating NUMERIC(3, 2) DEFAULT 5.00,
-        approval_status VARCHAR(50) DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS driver_documents (
-        id SERIAL PRIMARY KEY,
-        driver_id INT REFERENCES users(id) ON DELETE CASCADE,
-        doc_type VARCHAR(100),
-        file_path TEXT,
-        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS driver_bank_details (
-        driver_id VARCHAR(255) PRIMARY KEY,
-        account_holder_name VARCHAR(255),
-        account_number VARCHAR(100),
-        ifsc_code VARCHAR(20),
-        bank_name VARCHAR(100),
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS driver_withdrawals (
-        id SERIAL PRIMARY KEY,
-        driver_id VARCHAR(255) NOT NULL,
-        amount NUMERIC(10, 2) NOT NULL,
-        transfer_id VARCHAR(255) UNIQUE NOT NULL,
-        gateway_status VARCHAR(50) NOT NULL,
-        reference_id VARCHAR(255),
-        status VARCHAR(50) DEFAULT 'Pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-    console.log('Database tables verified/initialized successfully.');
-  } catch (err) {
-    console.error('Error initializing database tables:', err.message);
-  }
-})();
 
 // Helper Logic
 const normalizePhone = (num) => String(num || '').replace(/\D/g, '').slice(-10);
@@ -156,7 +98,7 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-// Temporary in-memory OTP store (Clears upon successful verification or server restart)
+// Temporary in-memory OTP store
 const otpStorage = {};
 
 // ==================== FAST2SMS REAL-TIME OTP ROUTES ====================
@@ -169,12 +111,10 @@ app.post('/api/auth/send-otp', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Valid 10-digit mobile number required' });
   }
 
-  // Generate a random 6-digit OTP code
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   otpStorage[phone] = otp;
 
   try {
-    // Official Fast2SMS otpV2 endpoint to bypass cloud server IP blocks
     const response = await axios.post('https://www.fast2sms.com/dev/otpV2', {
       variables_values: otp,
       route: 'otp',
@@ -194,21 +134,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
       return res.status(400).json({ success: false, error: Array.isArray(apiMsg) ? apiMsg.join(', ') : apiMsg });
     }
   } catch (err) {
-    let errorMsg = 'Internal server error while sending OTP';
-    if (err.response && err.response.data) {
-      if (typeof err.response.data === 'string') {
-        errorMsg = err.response.data;
-      } else if (err.response.data.message) {
-        errorMsg = Array.isArray(err.response.data.message) 
-          ? err.response.data.message.join(', ') 
-          : err.response.data.message;
-      } else {
-        errorMsg = JSON.stringify(err.response.data);
-      }
-    } else if (err.message) {
-      errorMsg = err.message;
-    }
-    
+    let errorMsg = err.message || 'Internal server error while sending OTP';
     console.error('Fast2SMS dispatch error:', errorMsg);
     return res.status(500).json({ success: false, error: errorMsg });
   }
@@ -226,7 +152,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 
   if (otpStorage[phone] && otpStorage[phone] === otp) {
-    delete otpStorage[phone]; // Clear OTP after single use
+    delete otpStorage[phone];
 
     try {
       let userResult = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
@@ -272,6 +198,90 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   res.status(400).json({ success: false, error: 'Invalid or expired OTP code' });
 });
 
+// ==================== USER PROFILE & SETTINGS SYNC APIs ====================
+
+// Saved Places Sync Endpoint
+app.post('/api/users/saved-places', auth, async (req, res) => {
+  try {
+    const { userId, type, address } = req.body;
+    const targetUserId = userId || req.user.id;
+
+    // Save/Update in saved_places table
+    await pool.query(`
+      INSERT INTO saved_places (user_id, title, address, lat, lng, type)
+      VALUES ($1, $2, $3, 0.0, 0.0, $2)
+      ON CONFLICT DO NOTHING
+    `, [targetUserId, type, address]);
+
+    // Also keep columns updated in users table if applicable
+    const updateCol = type === 'home' ? 'saved_home' : 'saved_work';
+    try {
+      await pool.query(`UPDATE users SET ${updateCol} = $1 WHERE id = $2`, [address, targetUserId]);
+    } catch (e) {
+      // Column might be dynamic depending on migration schema extensions
+    }
+
+    const updatedUserRes = await pool.query('SELECT * FROM users WHERE id = $1', [targetUserId]);
+    const updatedUser = updatedUserRes.rows[0];
+
+    const ioInstance = req.app.get('socketio');
+    if (ioInstance) {
+      ioInstance.emit('user_data_changed', updatedUser);
+    }
+
+    res.json({ success: true, message: 'Saved place updated successfully', user: updatedUser });
+  } catch (err) {
+    console.error('Error saving place:', err);
+    res.status(500).json({ success: false, error: 'Failed to save address' });
+  }
+});
+
+// Notification Preferences Sync Endpoint
+app.post('/api/users/notification-settings', auth, async (req, res) => {
+  try {
+    const { userId, type, enabled } = req.body;
+    const targetUserId = userId || req.user.id;
+
+    const column = type === 'rides' ? 'push_enabled' : 'sms_enabled';
+    await pool.query(`
+      INSERT INTO user_settings (user_id, ${column})
+      VALUES ($1, $2)
+      ON CONFLICT (user_id) DO UPDATE SET ${column} = $2
+    `, [targetUserId, enabled]);
+
+    res.json({ success: true, message: 'Notification settings updated' });
+  } catch (err) {
+    console.error('Error saving notification preferences:', err);
+    res.status(500).json({ success: false, error: 'Failed to update preferences' });
+  }
+});
+
+// Support Ticket Submission Endpoint
+app.post('/api/support/ticket', auth, async (req, res) => {
+  try {
+    const { userId, message } = req.body;
+    const targetUserId = userId || req.user.id;
+
+    const newTicketRes = await pool.query(`
+      INSERT INTO support_tickets (user_id, subject, message, status)
+      VALUES ($1, 'App Support Request', $2, 'open')
+      RETURNING *
+    `, [targetUserId, message]);
+
+    const newTicket = newTicketRes.rows[0];
+
+    const ioInstance = req.app.get('socketio');
+    if (ioInstance) {
+      ioInstance.emit('new_support_ticket', newTicket);
+    }
+
+    res.json({ success: true, message: 'Ticket created successfully', ticket: newTicket });
+  } catch (err) {
+    console.error('Error creating support ticket:', err);
+    res.status(500).json({ success: false, error: 'Failed to submit support ticket' });
+  }
+});
+
 // ==================== DRIVER REGISTRATION & ONBOARDING API ====================
 
 app.post('/api/driver/register', auth, driverOnly, async (req, res) => {
@@ -315,44 +325,6 @@ app.post('/api/driver/upload-documents', auth, driverOnly, upload.single('docume
   } catch (err) {
     console.error('Error recording uploaded document:', err);
     res.status(500).json({ success: false, error: 'Failed to save document record' });
-  }
-});
-
-// ==================== DRIVER INCENTIVES & WALLET API ====================
-
-app.get('/api/driver/incentives/summary', auth, driverOnly, async (req, res) => {
-  try {
-    res.json({
-      success: true,
-      data: {
-        quest: { completedRides: 0, targetRides: 50, bonusUnlocked: 0, nextTierBonus: 500 },
-        surge: { totalSurgeEarned: 0.0, withdrawableAmount: 0.0, peakHoursCount: '0.0 hrs', logs: [] }
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: 'Failed to fetch incentive summary' });
-  }
-});
-
-app.post('/api/driver/incentives/withdraw', auth, driverOnly, async (req, res) => {
-  const { amount } = req.body;
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ success: false, error: 'Invalid withdrawal amount' });
-  }
-
-  const transferId = 'TXN_' + Date.now() + '_' + req.user.id;
-  try {
-    await pool.query(
-      `INSERT INTO driver_withdrawals (driver_id, amount, transfer_id, gateway_status, status)
-       VALUES ($1, $2, $3, 'PENDING', 'Pending')`,
-      [req.user.id, amount, transferId]
-    );
-
-    io.emit('payout_status_updated');
-    res.json({ success: true, message: 'Withdrawal request submitted successfully' });
-  } catch (err) {
-    console.error('Error submitting withdrawal:', err);
-    res.status(500).json({ success: false, error: 'Failed to process withdrawal request' });
   }
 });
 
@@ -450,37 +422,6 @@ app.post('/api/admin/payments/withdrawals/:id/reject', auth, adminOnly, async (r
   } catch (err) {
     console.error('Error rejecting withdrawal:', err);
     res.status(500).json({ success: false, error: 'Failed to reject withdrawal' });
-  }
-});
-
-// ==================== DRIVER PROFILE & DASHBOARD API ====================
-
-app.get('/api/driver/profile', auth, driverOnly, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT u.id, u.full_name as name, u.phone_number as phone, dp.rating, dp.vehicle_number, dp.vehicle_type, dp.approval_status
-       FROM users u
-       JOIN driver_profiles dp ON u.id = dp.user_id
-       WHERE u.id = $1`,
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ success: false, error: 'Driver account record not found' });
-
-    const driver = rows[0];
-    res.json({
-      success: true,
-      data: {
-        name: driver.name || 'SwamiCab Driver',
-        rating: parseFloat(driver.rating || 5.0),
-        approvalStatus: driver.approval_status,
-        vehicle: {
-          number: driver.vehicle_number || 'Pending Reg',
-          type: driver.vehicle_type || 'Cab'
-        }
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: 'Error resolving driver profile' });
   }
 });
 
