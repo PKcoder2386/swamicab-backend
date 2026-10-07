@@ -70,6 +70,37 @@ CREATE TABLE IF NOT EXISTS driver_withdrawals (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Rides Table
+CREATE TABLE IF NOT EXISTS rides (
+    id SERIAL PRIMARY KEY,
+    ride_id VARCHAR(50) UNIQUE,
+    rider_id INT REFERENCES users(id),
+    driver_id INT REFERENCES users(id),
+    rider_name VARCHAR(255),
+    driver_name VARCHAR(255),
+    vehicle VARCHAR(50),
+    distance NUMERIC(10,2),
+    fare NUMERIC(10,2),
+    status VARCHAR(50) DEFAULT 'Completed',
+    payment_method VARCHAR(50) DEFAULT 'UPI',
+    pickup TEXT,
+    drop TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Rate Cards Table
+CREATE TABLE IF NOT EXISTS rate_cards (
+    id SERIAL PRIMARY KEY,
+    category VARCHAR(50) UNIQUE,
+    base_fare NUMERIC(10,2) DEFAULT 50.00,
+    per_km NUMERIC(10,2) DEFAULT 12.00,
+    per_min NUMERIC(10,2) DEFAULT 2.00,
+    min_fare NUMERIC(10,2) DEFAULT 80.00,
+    night_surge BOOLEAN DEFAULT TRUE,
+    peak_hour BOOLEAN DEFAULT TRUE,
+    platform_comm NUMERIC(5,2) DEFAULT 10.00
+);
+
 -- Saved Places (Home, Work, Favorites)
 CREATE TABLE IF NOT EXISTS saved_places (
     id SERIAL PRIMARY KEY,
