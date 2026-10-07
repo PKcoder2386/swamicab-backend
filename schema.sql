@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     saved_home TEXT,
     saved_work TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- Driver Profile & Verification
 CREATE TABLE IF NOT EXISTS driver_profiles (
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS driver_profiles (
     current_lat NUMERIC(10,8),
     current_lng NUMERIC(11,8),
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- Driver Document Upload Management
 CREATE TABLE IF NOT EXISTS driver_documents (
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS driver_documents (
     doc_type VARCHAR(100),
     file_path TEXT,
     uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- Driver Bank Details (For Payouts)
 CREATE TABLE IF NOT EXISTS driver_bank_details (
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS driver_bank_details (
     ifsc_code VARCHAR(20),
     bank_name VARCHAR(100),
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- Driver Withdrawals / Payouts Queue
 CREATE TABLE IF NOT EXISTS driver_withdrawals (
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS driver_withdrawals (
     reference_id VARCHAR(255),
     status VARCHAR(50) DEFAULT 'Pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- Saved Places (Home, Work, Favorites)
 CREATE TABLE IF NOT EXISTS saved_places (
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS saved_places (
     lng NUMERIC(11,8) DEFAULT 0.0,
     type VARCHAR(20) CHECK (type IN ('home', 'work', 'favorite')) DEFAULT 'favorite',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- In-App Notifications
 CREATE TABLE IF NOT EXISTS notifications (
@@ -90,7 +90,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     message TEXT NOT NULL,
     is_read BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- User App Preferences & Settings
 CREATE TABLE IF NOT EXISTS user_settings (
@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     push_enabled BOOLEAN DEFAULT TRUE,
     sms_enabled BOOLEAN DEFAULT TRUE,
     dark_mode BOOLEAN DEFAULT FALSE
-);[cite: 4]
+);
 
 -- Support & Help Desk
 CREATE TABLE IF NOT EXISTS support_tickets (
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     message TEXT NOT NULL,
     status VARCHAR(20) CHECK (status IN ('open', 'in_progress', 'resolved')) DEFAULT 'open',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- Admin Platform Settings
 CREATE TABLE IF NOT EXISTS admin_settings (
@@ -132,8 +132,8 @@ CREATE TABLE IF NOT EXISTS admin_settings (
     api_key VARCHAR(255) DEFAULT 'sc_live_984729384729384',
     webhook_url TEXT DEFAULT 'https://api.swamicab.com/webhooks/v1',
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);[cite: 4]
+);
 
 -- Performance Optimization Indexes
-CREATE INDEX IF NOT EXISTS idx_driver_withdrawals_status ON driver_withdrawals(status);[cite: 4]
-CREATE INDEX IF NOT EXISTS idx_saved_places_user ON saved_places(user_id);[cite: 4]
+CREATE INDEX IF NOT EXISTS idx_driver_withdrawals_status ON driver_withdrawals(status);
+CREATE INDEX IF NOT EXISTS idx_saved_places_user ON saved_places(user_id);
