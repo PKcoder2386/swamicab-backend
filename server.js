@@ -198,28 +198,100 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   res.status(400).json({ success: false, error: 'Invalid or expired OTP code' });
 });
 
+// ==================== ADMIN SETTINGS REAL-TIME APIs ====================
+
+app.get('/api/admin/settings', async (req, res) => {
+  try {
+    let result = await pool.query('SELECT * FROM admin_settings ORDER BY id ASC LIMIT 1');
+    if (result.rows.length === 0) {
+      // Insert default settings row if table is empty
+      result = await pool.query(`
+        INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle)
+        VALUES ('SwamiCab', 'support@swamicab.com', 'INR (₹)', 'Asia/Kolkata', 10, 15, 30, 'Weekly')
+        RETURNING *
+      `);
+    }
+    const row = result.rows[0];
+    // Map snake_case to camelCase expected by the frontend form state
+    res.json({
+      appName: row.app_name,
+      supportEmail: row.support_email,
+      currency: row.currency,
+      timeZone: row.time_zone,
+      commissionPercentage: parseFloat(row.commission_percentage),
+      baseBookingFee: parseFloat(row.base_booking_fee),
+      cancellationFee: parseFloat(row.cancellation_fee),
+      driverPayoutCycle: row.driver_payout_cycle,
+      accountHolderName: row.account_holder_name || '',
+      accountNumber: row.account_number || '',
+      ifscCode: row.ifsc_code || '',
+      bankName: row.bank_name || 'HDFC Bank',
+      upiId: row.upiId || '',
+      autoCommissionRouting: row.auto_commission_routing,
+      twoFactorEnabled: row.two_factor_enabled,
+      apiKey: row.api_key,
+      webhookUrl: row.webhook_url
+    });
+  } catch (err) {
+    console.error('Error fetching admin settings:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch settings' });
+  }
+});
+
+app.put('/api/admin/settings', async (req, res) => {
+  const {
+    appName, supportEmail, currency, timeZone,
+    commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle,
+    accountHolderName, accountNumber, ifscCode, bankName, upiId,
+    autoCommissionRouting, twoFactorEnabled, apiKey, webhookUrl
+  } = req.body;
+
+  try {
+    const checkRes = await pool.query('SELECT id FROM admin_settings ORDER BY id ASC LIMIT 1');
+    
+    if (checkRes.rows.length === 0) {
+      await pool.query(`
+        INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upiId, auto_commission_routing, two_factor_enabled, api_key, webhook_url)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      `, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, autoCommissionRouting, twoFactorEnabled, apiKey, webhookUrl]);
+    } else {
+      const id = checkRes.rows[0].id;
+      await pool.query(`
+        UPDATE admin_settings SET 
+          app_name = $1, support_email = $2, currency = $3, time_zone = $4,
+          commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8,
+          account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upiId = $13,
+          auto_commission_routing = $14, two_factor_enabled = $15, api_key = $16, webhook_url = $17,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $18
+      `, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, autoCommissionRouting, twoFactorEnabled, apiKey, webhookUrl, id]);
+    }
+
+    io.emit('settings_updated', req.body);
+    res.json({ success: true, message: 'Settings saved live to database successfully!' });
+  } catch (err) {
+    console.error('Error updating admin settings:', err);
+    res.status(500).json({ success: false, error: 'Failed to update settings' });
+  }
+});
+
 // ==================== USER PROFILE & SETTINGS SYNC APIs ====================
 
-// Saved Places Sync Endpoint
 app.post('/api/users/saved-places', auth, async (req, res) => {
   try {
     const { userId, type, address } = req.body;
     const targetUserId = userId || req.user.id;
 
-    // Save/Update in saved_places table
     await pool.query(`
       INSERT INTO saved_places (user_id, title, address, lat, lng, type)
       VALUES ($1, $2, $3, 0.0, 0.0, $2)
       ON CONFLICT DO NOTHING
     `, [targetUserId, type, address]);
 
-    // Also keep columns updated in users table if applicable
     const updateCol = type === 'home' ? 'saved_home' : 'saved_work';
     try {
       await pool.query(`UPDATE users SET ${updateCol} = $1 WHERE id = $2`, [address, targetUserId]);
-    } catch (e) {
-      // Column might be dynamic depending on migration schema extensions
-    }
+    } catch (e) {}
 
     const updatedUserRes = await pool.query('SELECT * FROM users WHERE id = $1', [targetUserId]);
     const updatedUser = updatedUserRes.rows[0];
@@ -236,7 +308,6 @@ app.post('/api/users/saved-places', auth, async (req, res) => {
   }
 });
 
-// Notification Preferences Sync Endpoint
 app.post('/api/users/notification-settings', auth, async (req, res) => {
   try {
     const { userId, type, enabled } = req.body;
@@ -256,7 +327,6 @@ app.post('/api/users/notification-settings', auth, async (req, res) => {
   }
 });
 
-// Support Ticket Submission Endpoint
 app.post('/api/support/ticket', auth, async (req, res) => {
   try {
     const { userId, message } = req.body;
@@ -269,7 +339,6 @@ app.post('/api/support/ticket', auth, async (req, res) => {
     `, [targetUserId, message]);
 
     const newTicket = newTicketRes.rows[0];
-
     const ioInstance = req.app.get('socketio');
     if (ioInstance) {
       ioInstance.emit('new_support_ticket', newTicket);

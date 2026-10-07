@@ -111,6 +111,29 @@ CREATE TABLE IF NOT EXISTS support_tickets (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Admin Platform Settings
+CREATE TABLE IF NOT EXISTS admin_settings (
+    id SERIAL PRIMARY KEY,
+    app_name VARCHAR(255) DEFAULT 'SwamiCab',
+    support_email VARCHAR(255) DEFAULT 'support@swamicab.com',
+    currency VARCHAR(50) DEFAULT 'INR (₹)',
+    time_zone VARCHAR(100) DEFAULT 'Asia/Kolkata',
+    commission_percentage NUMERIC(5,2) DEFAULT 10.00,
+    base_booking_fee NUMERIC(10,2) DEFAULT 15.00,
+    cancellation_fee NUMERIC(10,2) DEFAULT 30.00,
+    driver_payout_cycle VARCHAR(50) DEFAULT 'Weekly',
+    account_holder_name VARCHAR(255) DEFAULT '',
+    account_number VARCHAR(100) DEFAULT '',
+    ifsc_code VARCHAR(20) DEFAULT '',
+    bank_name VARCHAR(100) DEFAULT 'HDFC Bank',
+    upiId VARCHAR(255) DEFAULT '',
+    auto_commission_routing BOOLEAN DEFAULT TRUE,
+    two_factor_enabled BOOLEAN DEFAULT FALSE,
+    api_key VARCHAR(255) DEFAULT 'sc_live_984729384729384',
+    webhook_url TEXT DEFAULT 'https://api.swamicab.com/webhooks/v1',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Performance Optimization Indexes
 CREATE INDEX IF NOT EXISTS idx_driver_withdrawals_status ON driver_withdrawals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_places_user ON saved_places(user_id);
