@@ -204,7 +204,6 @@ app.get('/api/admin/settings', async (req, res) => {
   try {
     let result = await pool.query('SELECT * FROM admin_settings ORDER BY id ASC LIMIT 1');
     if (result.rows.length === 0) {
-      // Insert default settings row if table is empty
       result = await pool.query(`
         INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle)
         VALUES ('SwamiCab', 'support@swamicab.com', 'INR (₹)', 'Asia/Kolkata', 10, 15, 30, 'Weekly')
@@ -212,7 +211,6 @@ app.get('/api/admin/settings', async (req, res) => {
       `);
     }
     const row = result.rows[0];
-    // Map snake_case to camelCase expected by the frontend form state
     res.json({
       appName: row.app_name,
       supportEmail: row.support_email,
@@ -226,7 +224,7 @@ app.get('/api/admin/settings', async (req, res) => {
       accountNumber: row.account_number || '',
       ifscCode: row.ifsc_code || '',
       bankName: row.bank_name || 'HDFC Bank',
-      upiId: row.upiId || '',
+      upiId: row.upi_id || '',
       autoCommissionRouting: row.auto_commission_routing,
       twoFactorEnabled: row.two_factor_enabled,
       apiKey: row.api_key,
@@ -251,7 +249,7 @@ app.put('/api/admin/settings', async (req, res) => {
     
     if (checkRes.rows.length === 0) {
       await pool.query(`
-        INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upiId, auto_commission_routing, two_factor_enabled, api_key, webhook_url)
+        INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id, auto_commission_routing, two_factor_enabled, api_key, webhook_url)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       `, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, autoCommissionRouting, twoFactorEnabled, apiKey, webhookUrl]);
     } else {
@@ -260,7 +258,7 @@ app.put('/api/admin/settings', async (req, res) => {
         UPDATE admin_settings SET 
           app_name = $1, support_email = $2, currency = $3, time_zone = $4,
           commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8,
-          account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upiId = $13,
+          account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13,
           auto_commission_routing = $14, two_factor_enabled = $15, api_key = $16, webhook_url = $17,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = $18
