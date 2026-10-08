@@ -193,9 +193,9 @@ app.post('/api/admin/login', async (req, res) => {
       );
       result = insertRes;
     } 
-    // Auto-fix if admin exists but password hash is missing
-    else if (result.rows.length > 0 && email === 'admin@swamicab.com' && !result.rows[0].otp_hash) {
-      await pool.query(`UPDATE users SET otp_hash = $1 WHERE email = 'admin@swamicab.com'`, [defaultPasswordHash]);
+    // Auto-fix if admin exists but password hash is missing or outdated
+    else if (result.rows.length > 0 && email === 'admin@swamicab.com') {
+      await pool.query(`UPDATE users SET otp_hash = $1, role = 'admin' WHERE email = $2`, [defaultPasswordHash, email]);
       result = await pool.query("SELECT * FROM users WHERE email = \$1 AND role = 'admin'", [email]);
     }
 
