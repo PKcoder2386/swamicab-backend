@@ -4,6 +4,7 @@ const http = require('http');
 const cors = require('cors');
 const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
 const { Server } = require('socket.io');
 const multer = require('multer');
@@ -140,7 +141,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     delete otpStorage[phone];
 
     try {
-      let userResult = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
+      let userResult = await pool.query('SELECT * FROM users WHERE phone_number = \$1', [phone]);
       let user;
 
       if (userResult.rows.length === 0) {
@@ -151,7 +152,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         user = insertRes.rows[0];
       } else {
         user = userResult.rows[0];
-        await pool.query('UPDATE users SET is_verified = true WHERE id = $1', [user.id]);
+        await pool.query('UPDATE users SET is_verified = true WHERE id = \$1', [user.id]);
       }
 
       return res.json({
@@ -174,17 +175,20 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   res.status(400).json({ success: false, error: 'Invalid or expired OTP code' });
 });
 
-// ==================== ADMIN AUTH & PROFILE APIS ====================
+// ==================== SECURE ADMIN AUTH & PROFILE APIS ====================
 
 app.post('/api/admin/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    let result = await pool.query("SELECT * FROM users WHERE email = $1 AND role = 'admin'", [email]);
+    let result = await pool.query("SELECT * FROM users WHERE email = \$1 AND role = 'admin'", [email]);
     
+    // Auto-seed secure default admin account if none exists
     if (result.rows.length === 0 && email === 'admin@swamicab.com') {
+      const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
       const insertRes = await pool.query(
-        `INSERT INTO users (phone_number, full_name, email, role, is_verified) 
-         VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', true) RETURNING *`
+        `INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
+         VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', $1, true) RETURNING *`,
+        [defaultPasswordHash]
       );
       result = insertRes;
     }
@@ -194,6 +198,13 @@ app.post('/api/admin/login', async (req, res) => {
     }
 
     const admin = result.rows[0];
+    
+    // Verify password securely using bcrypt
+    const isPasswordValid = await bcrypt.compare(password || '', admin.otp_hash || '');
+    if (!isPasswordValid) {
+      return res.status(401).json({ success: false, message: 'Incorrect password. Access denied.' });
+    }
+
     const token = signToken(admin);
 
     res.json({
@@ -215,10 +226,11 @@ app.get('/api/admin/profile', async (req, res) => {
   try {
     let result = await pool.query("SELECT * FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1");
     if (result.rows.length === 0) {
+      const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
       result = await pool.query(`
-        INSERT INTO users (phone_number, full_name, email, role, is_verified) 
-        VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', true) RETURNING *
-      `);
+        INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
+        VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', $1, true) RETURNING *
+      `, [defaultPasswordHash]);
     }
     const admin = result.rows[0];
     res.json({
