@@ -182,15 +182,21 @@ app.post('/api/admin/login', async (req, res) => {
     const { email, password } = req.body;
     let result = await pool.query("SELECT * FROM users WHERE email = \$1 AND role = 'admin'", [email]);
     
-    // Auto-seed secure default admin account if none exists
+    const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
+
+    // Auto-seed if admin doesn't exist at all
     if (result.rows.length === 0 && email === 'admin@swamicab.com') {
-      const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
       const insertRes = await pool.query(
         `INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
          VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', $1, true) RETURNING *`,
         [defaultPasswordHash]
       );
       result = insertRes;
+    } 
+    // Auto-fix if admin exists but password hash is missing
+    else if (result.rows.length > 0 && email === 'admin@swamicab.com' && !result.rows[0].otp_hash) {
+      await pool.query(`UPDATE users SET otp_hash = $1 WHERE email = 'admin@swamicab.com'`, [defaultPasswordHash]);
+      result = await pool.query("SELECT * FROM users WHERE email = \$1 AND role = 'admin'", [email]);
     }
 
     if (result.rows.length === 0) {
