@@ -365,7 +365,7 @@ app.put('/api/admin/rate-cards', async (req, res) => {
   }
 });
 
-// ==================== REAL-TIME MARKET ANALYTICS ====================
+// ==================== REAL-TIME MARKET ANALYTICS (ZERO DUMMY DATA) ====================
 
 app.get('/api/admin/analytics', async (req, res) => {
   const { start, end } = req.query;
@@ -428,6 +428,19 @@ app.get('/api/admin/analytics', async (req, res) => {
   } catch (err) {
     console.error('Analytics error:', err.message);
     res.status(500).json({ success: false, error: 'Failed to fetch analytics' });
+  }
+});
+
+// Helper endpoint to instantly wipe all mock rides for production launch
+app.post('/api/admin/clear-dummy-data', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM rides');
+    await pool.query("UPDATE users SET wallet_balance = 0.00 WHERE role = 'driver'");
+    await pool.query('DELETE FROM driver_withdrawals');
+    io.emit('data_cleared');
+    res.json({ success: true, message: 'All demo and test ride records cleared successfully for market launch!' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
