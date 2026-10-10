@@ -368,23 +368,81 @@ app.put('/api/admin/rate-cards', async (req, res) => {
 // ==================== REAL-TIME MARKET ANALYTICS ====================
 
 app.get('/api/admin/analytics', async (req, res) => {
+  const { start, end } = req.query;
+  const startDate = start || '2026-09-01';
+  const endDate = end || '2026-12-31';
+
   try {
     const growthRes = await pool.query(`
       SELECT TO_CHAR(created_at, 'Dy') as month, COALESCE(SUM(fare), 0) as "Revenue", COALESCE(SUM(admin_commission), 0) as "Expense"
-      FROM rides WHERE status = 'Completed' AND created_at >= NOW() - INTERVAL '7 days'
-      GROUP BY TO_CHAR(created_at, 'Dy'), DATE(created_at) ORDER BY DATE(created_at) ASC
-    `);
+      FROM rides 
+      WHERE status = 'Completed' 
+        AND created_at::date >= $1::date 
+        AND created_at::date <= $2::date
+      GROUP BY TO_CHAR(created_at, 'Dy'), DATE(created_at) 
+      ORDER BY DATE(created_at) ASC
+    `, [startDate, endDate]);
 
-    const paymentRes = await pool.query(`SELECT payment_method as name, COUNT(*) * 100.0 / NULLIF(SUM(COUNT(*)) OVER(), 0) as value FROM rides GROUP BY payment_method`);
-    const topAreasRes = await pool.query(`SELECT pickup as name, COUNT(*) as "ridesCount" FROM rides GROUP BY pickup ORDER BY "ridesCount" DESC LIMIT 5`);
+    const paymentRes = await pool.query(`
+      SELECT payment_method as name, ROUND(COUNT(*) * 100.0 / NULLIF(SUM(COUNT(*)) OVER(), 0), 1) as value 
+      FROM rides 
+      WHERE created_at::date >= $1::date AND created_at::date <= $2::date
+      GROUP BY payment_method
+    `, [startDate, endDate]);
+
+    const topAreasRes = await pool.query(`
+      SELECT pickup as name, COUNT(*) as "ridesCount" 
+      FROM rides 
+      WHERE created_at::date >= $1::date AND created_at::date <= $2::date
+      GROUP BY pickup 
+      ORDER BY "ridesCount" DESC 
+      LIMIT 4
+    `, [startDate, endDate]);
+
+    const heatmapData = [];
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    for (const day of days) {
+      const row = [];
+      const hours = [6, 9, 12, 15, 18, 21];
+      for (const hr of hours) {
+        const countRes = await pool.query(`
+          SELECT COUNT(*) as cnt FROM rides 
+          WHERE TO_CHAR(created_at, 'Dy') = $1 
+            AND EXTRACT(HOUR FROM created_at) >= $2 
+            AND EXTRACT(HOUR FROM created_at) < ($2 + 3)
+            AND created_at::date >= $3::date AND created_at::date <= $4::date
+        `, [day, hr, startDate, endDate]);
+        const count = parseInt(countRes.rows[0]?.cnt || 0);
+        const intensity = Math.min(Math.max(count / 10, 0.1), 1.0);
+        row.push(parseFloat(intensity.toFixed(1)));
+      }
+      heatmapData.push(row);
+    }
 
     res.json({
       growthData: growthRes.rows,
       paymentBreakdown: paymentRes.rows,
-      topAreas: topAreasRes.rows
+      topAreas: topAreasRes.rows,
+      heatmapData
     });
   } catch (err) {
+    console.error('Analytics error:', err.message);
     res.status(500).json({ success: false, error: 'Failed to fetch analytics' });
+  }
+});
+
+app.get('/api/admin/analytics/export-csv', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT ride_id, rider_name, driver_name, vehicle, fare, status, payment_method, pickup, drop, created_at FROM rides ORDER BY created_at DESC');
+    let csv = 'Ride ID,Rider,Driver,Vehicle,Fare,Status,Payment,Pickup,Drop,Date\n';
+    rows.forEach(r => {
+      csv += `"${r.ride_id}","${r.rider_name || ''}","${r.driver_name || ''}","${r.vehicle || ''}",${r.fare || 0},"${r.status}","${r.payment_method}","${r.pickup || ''}","${r.drop || ''}","${r.created_at}"\n`;
+    });
+    res.header('Content-Type', 'text/csv');
+    res.attachment('SwamiCab-Analytics-Report.csv');
+    res.send(csv);
+  } catch (err) {
+    res.status(500).send('Failed to export CSV');
   }
 });
 
