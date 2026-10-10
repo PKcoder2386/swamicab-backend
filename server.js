@@ -186,18 +186,15 @@ app.post('/api/admin/login', async (req, res) => {
       [email]
     );
 
-    const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
-
+    // ONLY auto-seed default admin if no admin record exists at all
     if (result.rows.length === 0 && email === 'admin@swamicab.com') {
+      const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
       const insertRes = await pool.query(
         `INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
          VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', $1, true) RETURNING *`,
         [defaultPasswordHash]
       );
       result = insertRes;
-    } else if (result.rows.length > 0 && email === 'admin@swamicab.com') {
-      await pool.query(`UPDATE users SET otp_hash = $1, role = 'admin' WHERE email = $2`, [defaultPasswordHash, email]);
-      result = await pool.query("SELECT * FROM users WHERE LOWER(email) = LOWER(\$1) AND role = 'admin'", [email]);
     }
 
     if (result.rows.length === 0) {
@@ -206,6 +203,7 @@ app.post('/api/admin/login', async (req, res) => {
 
     const admin = result.rows[0];
     
+    // Verify password securely using bcrypt against the database record
     const isPasswordValid = await bcrypt.compare(password || '', admin.otp_hash || '');
     if (!isPasswordValid) {
       return res.status(401).json({ success: false, message: 'Incorrect password. Access denied.' });
@@ -252,14 +250,23 @@ app.get('/api/admin/profile', async (req, res) => {
 });
 
 app.put('/api/admin/profile', async (req, res) => {
-  const { fullName, email, phone } = req.body;
+  const { fullName, email, phone, newPassword } = req.body;
   try {
-    await pool.query(
-      `UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE role = 'admin'`,
-      [fullName, email, phone]
-    );
+    if (newPassword && newPassword.trim() !== '') {
+      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+      await pool.query(
+        `UPDATE users SET full_name = $1, email = $2, phone_number = $3, otp_hash = $4 WHERE role = 'admin'`,
+        [fullName, email, phone, hashedNewPassword]
+      );
+    } else {
+      await pool.query(
+        `UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE role = 'admin'`,
+        [fullName, email, phone]
+      );
+    }
+    
     io.emit('admin_profile_updated', { fullName, email, phone });
-    res.json({ success: true, message: 'Admin profile updated successfully!' });
+    res.json({ success: true, message: 'Admin profile and credentials updated successfully!' });
   } catch (err) {
     console.error('Error updating admin profile:', err);
     res.status(500).json({ success: false, error: 'Failed to update profile' });
@@ -293,12 +300,11 @@ app.post('/api/webhooks/cashfree', express.json(), async (req, res) => {
 
 // ==================== RIDE COMMISSION SPLIT & WALLET PAYOUTS ====================
 
-// Complete ride: Keeps 10% admin commission and deposits 90% into driver wallet
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
   const { rideId, totalFare, driverId } = req.body;
   try {
-    const adminCut = totalFare * 0.10; // 10% commission
-    const driverEarnings = totalFare - adminCut; // 90% to driver
+    const adminCut = totalFare * 0.10; 
+    const driverEarnings = totalFare - adminCut; 
 
     await pool.query(
       `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
@@ -318,7 +324,6 @@ app.post('/api/rides/complete-ride', auth, async (req, res) => {
   }
 });
 
-// Driver bank withdrawal request (Direct Cashfree payout transfer for 90% earnings)
 app.post('/api/driver/withdraw', auth, async (req, res) => {
   const { amount, bankAccountNumber, ifscCode, accountHolderName } = req.body;
   const driverId = req.user.id;
