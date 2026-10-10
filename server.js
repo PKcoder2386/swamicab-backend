@@ -180,11 +180,16 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 app.post('/api/admin/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    let result = await pool.query("SELECT * FROM users WHERE email = \$1 AND role = 'admin'", [email]);
     
+    // Explicitly query for admin user with clean parameter binding
+    let result = await pool.query(
+      "SELECT * FROM users WHERE LOWER(email) = LOWER(\$1) AND role = 'admin'", 
+      [email]
+    );
+
     const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
 
-    // Auto-seed if admin doesn't exist at all
+    // Auto-seed or self-heal admin record if missing/unhashed
     if (result.rows.length === 0 && email === 'admin@swamicab.com') {
       const insertRes = await pool.query(
         `INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
@@ -192,11 +197,9 @@ app.post('/api/admin/login', async (req, res) => {
         [defaultPasswordHash]
       );
       result = insertRes;
-    } 
-    // Auto-fix if admin exists but password hash is missing or outdated
-    else if (result.rows.length > 0 && email === 'admin@swamicab.com') {
+    } else if (result.rows.length > 0 && email === 'admin@swamicab.com') {
       await pool.query(`UPDATE users SET otp_hash = $1, role = 'admin' WHERE email = $2`, [defaultPasswordHash, email]);
-      result = await pool.query("SELECT * FROM users WHERE email = \$1 AND role = 'admin'", [email]);
+      result = await pool.query("SELECT * FROM users WHERE LOWER(email) = LOWER(\$1) AND role = 'admin'", [email]);
     }
 
     if (result.rows.length === 0) {
@@ -263,6 +266,31 @@ app.put('/api/admin/profile', async (req, res) => {
   } catch (err) {
     console.error('Error updating admin profile:', err);
     res.status(500).json({ success: false, error: 'Failed to update profile' });
+  }
+});
+
+// ==================== CASHFREE WEBHOOK LISTENER ====================
+
+app.post('/api/webhooks/cashfree', express.json(), async (req, res) => {
+  try {
+    const event = req.body;
+    console.log('🔔 Cashfree Webhook Received:', JSON.stringify(event, null, 2));
+
+    const eventType = event.type || event.event;
+    const transferId = event.data?.transferId || event.transferId;
+
+    if ((eventType === 'PAYOUT_SUCCESS' || eventType === 'TRANSFER_SUCCESS') && transferId) {
+      await pool.query(
+        `UPDATE driver_withdrawals SET status = 'Completed', gateway_status = 'SUCCESS' WHERE transfer_id = $1`,
+        [transferId]
+      );
+      io.emit('payout_status_updated');
+    }
+
+    return res.status(200).json({ status: 'OK' });
+  } catch (err) {
+    console.error('Webhook processing error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
