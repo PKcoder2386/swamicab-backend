@@ -181,7 +181,6 @@ app.post('/api/admin/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     
-    // Explicitly query for admin user with clean parameter binding
     let result = await pool.query(
       "SELECT * FROM users WHERE LOWER(email) = LOWER(\$1) AND role = 'admin'", 
       [email]
@@ -189,7 +188,6 @@ app.post('/api/admin/login', async (req, res) => {
 
     const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
 
-    // Auto-seed or self-heal admin record if missing/unhashed
     if (result.rows.length === 0 && email === 'admin@swamicab.com') {
       const insertRes = await pool.query(
         `INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
@@ -208,7 +206,6 @@ app.post('/api/admin/login', async (req, res) => {
 
     const admin = result.rows[0];
     
-    // Verify password securely using bcrypt
     const isPasswordValid = await bcrypt.compare(password || '', admin.otp_hash || '');
     if (!isPasswordValid) {
       return res.status(401).json({ success: false, message: 'Incorrect password. Access denied.' });
