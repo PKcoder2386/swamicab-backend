@@ -250,26 +250,29 @@ app.get('/api/admin/profile', async (req, res) => {
 });
 
 app.put('/api/admin/profile', async (req, res) => {
-  const { fullName, email, phone, newPassword } = req.body;
+  const { fullName, name, email, phone, phoneNumber, newPassword } = req.body;
+  const fName = fullName || name || 'SwamiCab Admin';
+  const pNumber = phone || phoneNumber || '9876543210';
+
   try {
     if (newPassword && newPassword.trim() !== '') {
       const hashedNewPassword = await bcrypt.hash(newPassword, 10);
       await pool.query(
         `UPDATE users SET full_name = $1, email = $2, phone_number = $3, otp_hash = $4 WHERE role = 'admin'`,
-        [fullName, email, phone, hashedNewPassword]
+        [fName, email, pNumber, hashedNewPassword]
       );
     } else {
       await pool.query(
         `UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE role = 'admin'`,
-        [fullName, email, phone]
+        [fName, email, pNumber]
       );
     }
     
-    io.emit('admin_profile_updated', { fullName, email, phone });
+    io.emit('admin_profile_updated', { fullName: fName, email, phone: pNumber });
     res.json({ success: true, message: 'Admin profile and credentials updated successfully!' });
   } catch (err) {
-    console.error('Error updating admin profile:', err);
-    res.status(500).json({ success: false, error: 'Failed to update profile' });
+    console.error('Error updating admin profile:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
