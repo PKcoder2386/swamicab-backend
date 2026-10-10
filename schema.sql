@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS driver_withdrawals (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Rides Table
+-- Rides Table with Real-time Financial Breakdown
 CREATE TABLE IF NOT EXISTS rides (
     id SERIAL PRIMARY KEY,
     ride_id VARCHAR(50) UNIQUE,
@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS rides (
     vehicle VARCHAR(50),
     distance NUMERIC(10,2),
     fare NUMERIC(10,2),
+    admin_commission NUMERIC(10,2) DEFAULT 0.00,
+    driver_earning NUMERIC(10,2) DEFAULT 0.00,
     status VARCHAR(50) DEFAULT 'Completed',
     payment_method VARCHAR(50) DEFAULT 'UPI',
     pickup TEXT,
@@ -88,7 +90,7 @@ CREATE TABLE IF NOT EXISTS rides (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Rate Cards Table
+-- Rate Cards Table (Dynamic Category Pricing)
 CREATE TABLE IF NOT EXISTS rate_cards (
     id SERIAL PRIMARY KEY,
     category VARCHAR(50) UNIQUE,
@@ -101,7 +103,7 @@ CREATE TABLE IF NOT EXISTS rate_cards (
     platform_comm NUMERIC(5,2) DEFAULT 10.00
 );
 
--- Saved Places (Home, Work, Favorites)
+-- Saved Places
 CREATE TABLE IF NOT EXISTS saved_places (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id) ON DELETE CASCADE,
@@ -113,7 +115,7 @@ CREATE TABLE IF NOT EXISTS saved_places (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- In-App Notifications
+-- Notifications
 CREATE TABLE IF NOT EXISTS notifications (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id) ON DELETE CASCADE,
@@ -123,7 +125,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- User App Preferences & Settings
+-- User Settings
 CREATE TABLE IF NOT EXISTS user_settings (
     user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     language VARCHAR(10) DEFAULT 'en',
@@ -132,7 +134,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     dark_mode BOOLEAN DEFAULT FALSE
 );
 
--- Support & Help Desk
+-- Support Tickets
 CREATE TABLE IF NOT EXISTS support_tickets (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id),
@@ -165,6 +167,6 @@ CREATE TABLE IF NOT EXISTS admin_settings (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Performance Optimization Indexes
+-- Indexes
 CREATE INDEX IF NOT EXISTS idx_driver_withdrawals_status ON driver_withdrawals(status);
 CREATE INDEX IF NOT EXISTS idx_saved_places_user ON saved_places(user_id);

@@ -78,235 +78,62 @@ const auth = (req, res, next) => {
   }
 };
 
-const adminOnly = (req, res, next) => {
-  next();
-};
-
 const otpStorage = {};
 
-// ==================== FAST2SMS REAL-TIME OTP ROUTES ====================
+// ==================== REAL-TIME MARKET FARE ESTIMATION & COMMISSION ENGINES ====================
 
-app.post('/api/auth/send-otp', async (req, res) => {
-  const { phoneNumber } = req.body;
-  const phone = normalizePhone(phoneNumber);
-
-  if (!phone || phone.length !== 10) {
-    return res.status(400).json({ success: false, error: 'Valid 10-digit mobile number required' });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  otpStorage[phone] = otp;
-
+app.post('/api/rides/estimate', async (req, res) => {
+  const { distanceKm, durationMins, vehicleCategory } = req.body;
   try {
-    if (!process.env.FAST2SMS_API_KEY) {
-      console.log(`[DEV MODE] OTP for ${phone}: ${otp}`);
-      return res.status(200).json({ success: true, message: 'OTP generated successfully (Dev Mode)' });
-    }
+    const settingsRes = await pool.query('SELECT * FROM admin_settings ORDER BY id ASC LIMIT 1');
+    const settings = settingsRes.rows[0] || {};
+    const globalBookingFee = parseFloat(settings.base_booking_fee || 15);
 
-    const response = await axios.post('https://www.fast2sms.com/dev/otpV2', {
-      variables_values: otp,
-      route: 'otp',
-      numbers: phone
-    }, {
-      headers: {
-        'authorization': process.env.FAST2SMS_API_KEY,
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache'
-      }
-    });
-
-    if (response.data && response.data.return) {
-      return res.status(200).json({ success: true, message: 'OTP sent successfully to your mobile' });
-    } else {
-      return res.status(400).json({ success: false, error: 'Failed to send SMS via Fast2SMS' });
-    }
-  } catch (err) {
-    console.error('Fast2SMS dispatch error:', err.message);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.post('/api/auth/verify-otp', async (req, res) => {
-  const { phoneNumber, otp, role: requestedRole } = req.body;
-  const phone = normalizePhone(phoneNumber);
-  const role = ['rider', 'driver', 'admin'].includes((requestedRole || '').toLowerCase())
-    ? requestedRole.toLowerCase()
-    : 'rider';
-
-  if (!phone || !otp) {
-    return res.status(400).json({ success: false, error: 'Phone number and OTP are required' });
-  }
-
-  if (otpStorage[phone] && otpStorage[phone] === otp) {
-    delete otpStorage[phone];
-
-    try {
-      let userResult = await pool.query('SELECT * FROM users WHERE phone_number = \$1', [phone]);
-      let user;
-
-      if (userResult.rows.length === 0) {
-        const insertRes = await pool.query(
-          `INSERT INTO users (phone_number, role, is_verified) VALUES ($1, $2, true) RETURNING *`,
-          [phone, role]
-        );
-        user = insertRes.rows[0];
-      } else {
-        user = userResult.rows[0];
-        await pool.query('UPDATE users SET is_verified = true WHERE id = \$1', [user.id]);
-      }
-
-      return res.json({
-        success: true,
-        token: signToken(user),
-        user: {
-          id: user.id,
-          phone_number: user.phone_number,
-          role: user.role,
-          full_name: user.full_name,
-          email: user.email
-        }
-      });
-    } catch (dbErr) {
-      console.error('Database user resolution error:', dbErr);
-      return res.status(500).json({ success: false, error: 'Database error processing user session' });
-    }
-  }
-
-  res.status(400).json({ success: false, error: 'Invalid or expired OTP code' });
-});
-
-// ==================== SECURE ADMIN AUTH & PROFILE APIS ====================
-
-app.post('/api/admin/login', async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    let result = await pool.query(
-      "SELECT * FROM users WHERE LOWER(email) = LOWER(\$1) AND role = 'admin'", 
-      [email]
+    const rateRes = await pool.query(
+      'SELECT * FROM rate_cards WHERE LOWER(category) = LOWER(\$1)', 
+      [vehicleCategory || 'Mini']
     );
 
-    // ONLY auto-seed default admin if no admin record exists at all
-    if (result.rows.length === 0 && email === 'admin@swamicab.com') {
-      const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
-      const insertRes = await pool.query(
-        `INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
-         VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', $1, true) RETURNING *`,
-        [defaultPasswordHash]
-      );
-      result = insertRes;
-    }
+    const rate = rateRes.rows[0] || { base_fare: 50, per_km: 12, per_min: 2, min_fare: 80, platform_comm: 10 };
+    const baseFare = parseFloat(rate.base_fare);
+    const perKm = parseFloat(rate.per_km);
+    const perMin = parseFloat(rate.per_min);
+    const minFare = parseFloat(rate.min_fare);
 
-    if (result.rows.length === 0) {
-      return res.status(401).json({ success: false, message: 'Invalid admin credentials.' });
-    }
-
-    const admin = result.rows[0];
-    
-    // Verify password securely using bcrypt against the database record
-    const isPasswordValid = await bcrypt.compare(password || '', admin.otp_hash || '');
-    if (!isPasswordValid) {
-      return res.status(401).json({ success: false, message: 'Incorrect password. Access denied.' });
-    }
-
-    const token = signToken(admin);
+    let calculatedFare = baseFare + (distanceKm * perKm) + (durationMins * perMin) + globalBookingFee;
+    if (calculatedFare < minFare) calculatedFare = minFare;
 
     res.json({
       success: true,
-      token,
-      admin: {
-        id: admin.id,
-        name: admin.full_name,
-        email: admin.email
+      estimatedFare: Math.round(calculatedFare),
+      currency: settings.currency || 'INR (₹)',
+      breakdown: {
+        baseFare,
+        distanceCharge: distanceKm * perKm,
+        timeCharge: durationMins * perMin,
+        baseBookingFee: globalBookingFee,
+        platformCommissionPercent: parseFloat(rate.platform_comm || settings.commission_percentage || 10)
       }
     });
   } catch (err) {
-    console.error('Admin login error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
-app.get('/api/admin/profile', async (req, res) => {
-  try {
-    let result = await pool.query("SELECT * FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1");
-    if (result.rows.length === 0) {
-      const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
-      result = await pool.query(`
-        INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
-        VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', $1, true) RETURNING *
-      `, [defaultPasswordHash]);
-    }
-    const admin = result.rows[0];
-    res.json({
-      full_name: admin.full_name,
-      email: admin.email,
-      phone_number: admin.phone_number,
-      role: 'Super Administrator'
-    });
-  } catch (err) {
-    console.error('Error fetching admin profile:', err);
-    res.status(500).json({ success: false, error: 'Failed to fetch admin profile' });
-  }
-});
-
-app.put('/api/admin/profile', async (req, res) => {
-  const { fullName, name, email, phone, phoneNumber, newPassword } = req.body;
-  const fName = fullName || name || 'SwamiCab Admin';
-  const pNumber = phone || phoneNumber || '9876543210';
-
-  try {
-    if (newPassword && newPassword.trim() !== '') {
-      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
-      await pool.query(
-        `UPDATE users SET full_name = $1, email = $2, phone_number = $3, otp_hash = $4 WHERE role = 'admin'`,
-        [fName, email, pNumber, hashedNewPassword]
-      );
-    } else {
-      await pool.query(
-        `UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE role = 'admin'`,
-        [fName, email, pNumber]
-      );
-    }
-    
-    io.emit('admin_profile_updated', { fullName: fName, email, phone: pNumber });
-    res.json({ success: true, message: 'Admin profile and credentials updated successfully!' });
-  } catch (err) {
-    console.error('Error updating admin profile:', err.message);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ==================== CASHFREE WEBHOOK LISTENER ====================
-
-app.post('/api/webhooks/cashfree', express.json(), async (req, res) => {
-  try {
-    const event = req.body;
-    console.log('🔔 Cashfree Webhook Received:', JSON.stringify(event, null, 2));
-
-    const eventType = event.type || event.event;
-    const transferId = event.data?.transferId || event.transferId;
-
-    if ((eventType === 'PAYOUT_SUCCESS' || eventType === 'TRANSFER_SUCCESS') && transferId) {
-      await pool.query(
-        `UPDATE driver_withdrawals SET status = 'Completed', gateway_status = 'SUCCESS' WHERE transfer_id = $1`,
-        [transferId]
-      );
-      io.emit('payout_status_updated');
-    }
-
-    return res.status(200).json({ status: 'OK' });
-  } catch (err) {
-    console.error('Webhook processing error:', err.message);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// ==================== RIDE COMMISSION SPLIT & WALLET PAYOUTS ====================
 
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
-  const { rideId, totalFare, driverId } = req.body;
+  const { rideId, totalFare, driverId, vehicleCategory } = req.body;
   try {
-    const adminCut = totalFare * 0.10; 
+    const settingsRes = await pool.query('SELECT commission_percentage FROM admin_settings ORDER BY id ASC LIMIT 1');
+    let commissionPercent = parseFloat(settingsRes.rows[0]?.commission_percentage || 10);
+
+    if (vehicleCategory) {
+      const rateRes = await pool.query('SELECT platform_comm FROM rate_cards WHERE LOWER(category) = LOWER(\$1)', [vehicleCategory]);
+      if (rateRes.rows.length > 0 && rateRes.rows[0].platform_comm != null) {
+        commissionPercent = parseFloat(rateRes.rows[0].platform_comm);
+      }
+    }
+
+    const adminCut = Math.round(totalFare * (commissionPercent / 100)); 
     const driverEarnings = totalFare - adminCut; 
 
     await pool.query(
@@ -315,15 +142,116 @@ app.post('/api/rides/complete-ride', auth, async (req, res) => {
     );
 
     await pool.query(
-      `UPDATE rides SET status = 'Completed', fare = $1 WHERE ride_id = $2`,
-      [totalFare, rideId]
+      `UPDATE rides SET status = 'Completed', fare = $1, admin_commission = $2, driver_earning = $3 WHERE ride_id = $4`,
+      [totalFare, adminCut, driverEarnings, rideId]
     );
 
-    io.emit('ride_completed', { rideId, totalFare, driverEarnings });
-    res.json({ success: true, adminCut, driverEarnings });
+    io.emit('ride_completed', { rideId, totalFare, adminCut, driverEarnings, commissionPercent });
+    res.json({ success: true, commissionPercent, adminCut, driverEarnings });
   } catch (err) {
-    console.error('Ride completion commission error:', err);
+    console.error('Ride completion error:', err);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/rides/cancel', auth, async (req, res) => {
+  const { rideId, cancelledBy, userId } = req.body;
+  try {
+    const settingsRes = await pool.query('SELECT cancellation_fee FROM admin_settings ORDER BY id ASC LIMIT 1');
+    const cancellationFee = parseFloat(settingsRes.rows[0]?.cancellation_fee || 30);
+
+    if (cancelledBy === 'rider' && userId) {
+      await pool.query('UPDATE users SET wallet_balance = wallet_balance - \$1 WHERE id = \$2', [cancellationFee, userId]);
+    }
+
+    await pool.query(`UPDATE rides SET status = 'Cancelled' WHERE ride_id = $1`, [rideId]);
+    io.emit('ride_cancelled', { rideId, cancelledBy, cancellationFee });
+    res.json({ success: true, message: 'Ride cancelled successfully', cancellationFee });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==================== SECURE ADMIN AUTH & PROFILE APIS ====================
+
+app.post('/api/admin/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    let result = await pool.query("SELECT * FROM users WHERE LOWER(email) = LOWER(\$1) AND role = 'admin'", [email]);
+
+    if (result.rows.length === 0 && email === 'admin@swamicab.com') {
+      const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
+      result = await pool.query(
+        `INSERT INTO users (phone_number, full_name, email, role, otp_hash, is_verified) 
+         VALUES ('9876543210', 'SwamiCab Super Admin', 'admin@swamicab.com', 'admin', $1, true) RETURNING *`,
+        [defaultPasswordHash]
+      );
+    }
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ success: false, message: 'Invalid admin credentials.' });
+    }
+
+    const admin = result.rows[0];
+    const isPasswordValid = await bcrypt.compare(password || '', admin.otp_hash || '');
+    if (!isPasswordValid) {
+      return res.status(401).json({ success: false, message: 'Incorrect password. Access denied.' });
+    }
+
+    res.json({
+      success: true,
+      token: signToken(admin),
+      admin: { id: admin.id, name: admin.full_name, email: admin.email }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/admin/profile', async (req, res) => {
+  try {
+    let result = await pool.query("SELECT * FROM users WHERE role = 'admin' ORDER BY id ASC LIMIT 1");
+    const admin = result.rows[0];
+    res.json({ full_name: admin.full_name, email: admin.email, phone_number: admin.phone_number, role: 'Super Administrator' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to fetch admin profile' });
+  }
+});
+
+app.put('/api/admin/profile', async (req, res) => {
+  const { fullName, name, email, phone, phoneNumber, newPassword } = req.body;
+  const fName = fullName || name || 'SwamiCab Admin';
+  const pNumber = phone || phoneNumber || '7420868825';
+
+  try {
+    if (newPassword && newPassword.trim() !== '') {
+      const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+      await pool.query(`UPDATE users SET full_name = $1, email = $2, phone_number = $3, otp_hash = $4 WHERE role = 'admin'`, [fName, email, pNumber, hashedNewPassword]);
+    } else {
+      await pool.query(`UPDATE users SET full_name = $1, email = $2, phone_number = $3 WHERE role = 'admin'`, [fName, email, pNumber]);
+    }
+    io.emit('admin_profile_updated', { fullName: fName, email, phone: pNumber });
+    res.json({ success: true, message: 'Admin profile updated successfully!' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==================== CASHFREE WEBHOOK & PAYOUTS ====================
+
+app.post('/api/webhooks/cashfree', express.json(), async (req, res) => {
+  try {
+    const event = req.body;
+    const eventType = event.type || event.event;
+    const transferId = event.data?.transferId || event.transferId;
+
+    if ((eventType === 'PAYOUT_SUCCESS' || eventType === 'TRANSFER_SUCCESS') && transferId) {
+      await pool.query(`UPDATE driver_withdrawals SET status = 'Completed', gateway_status = 'SUCCESS' WHERE transfer_id = $1`, [transferId]);
+      io.emit('payout_status_updated');
+    }
+    return res.status(200).json({ status: 'OK' });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -336,67 +264,40 @@ app.post('/api/driver/withdraw', auth, async (req, res) => {
     const currentBalance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
 
     if (currentBalance < amount) {
-      return res.status(400).json({ success: false, error: 'Insufficient wallet balance for withdrawal' });
+      return res.status(400).json({ success: false, error: 'Insufficient wallet balance' });
     }
 
     const transferId = `TR_${driverId}_${Date.now()}`;
-    const baseUrl = CASHFREE_ENV === 'PRODUCTION' 
-      ? 'https://payout-api.cashfree.com' 
-      : 'https://payout-gamma.cashfree.com';
-
+    const baseUrl = CASHFREE_ENV === 'PRODUCTION' ? 'https://payout-api.cashfree.com' : 'https://payout-gamma.cashfree.com';
     let gatewayStatus = 'SUCCESS';
 
     if (CASHFREE_CLIENT_ID && CASHFREE_CLIENT_SECRET) {
       try {
-        const payoutRes = await axios.post(`${baseUrl}/payout/v1/directTransfer`, {
-          transferId,
-          amount,
-          transferMode: 'imps',
-          beneDetails: {
-            name: accountHolderName,
-            accountNumber: bankAccountNumber,
-            ifsc: ifscCode
-          }
-        }, {
-          headers: {
-            'X-Client-Id': CASHFREE_CLIENT_ID,
-            'X-Client-Secret': CASHFREE_CLIENT_SECRET,
-            'Content-Type': 'application/json'
-          }
-        });
-        gatewayStatus = payoutRes.data?.status || 'SUCCESS';
-      } catch (gatewayErr) {
-        console.error('Cashfree payout error:', gatewayErr.message);
+        await axios.post(`${baseUrl}/payout/v1/directTransfer`, {
+          transferId, amount, transferMode: 'imps', beneDetails: { name: accountHolderName, accountNumber: bankAccountNumber, ifsc: ifscCode }
+        }, { headers: { 'X-Client-Id': CASHFREE_CLIENT_ID, 'X-Client-Secret': CASHFREE_CLIENT_SECRET, 'Content-Type': 'application/json' } });
+      } catch (err) {
         gatewayStatus = 'PENDING_REVIEW';
       }
     }
 
     await pool.query('UPDATE users SET wallet_balance = wallet_balance - \$1 WHERE id = \$2', [amount, driverId]);
-    await pool.query(
-      `INSERT INTO driver_withdrawals (driver_id, amount, transfer_id, gateway_status, status)
-       VALUES ($1, $2, $3, $4, 'Pending')`,
-      [driverId, amount, transferId, gatewayStatus]
-    );
+    await pool.query(`INSERT INTO driver_withdrawals (driver_id, amount, transfer_id, gateway_status, status) VALUES ($1, $2, $3, $4, 'Pending')`, [driverId, amount, transferId, gatewayStatus]);
 
     io.emit('payout_requested');
-    res.json({ success: true, message: 'Withdrawal request submitted successfully!', transferId });
+    res.json({ success: true, message: 'Withdrawal requested successfully!', transferId });
   } catch (err) {
-    console.error('Withdrawal error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ==================== ADMIN SETTINGS APIS ====================
+// ==================== ADMIN SETTINGS & RATE CARDS ====================
 
 app.get('/api/admin/settings', async (req, res) => {
   try {
     let result = await pool.query('SELECT * FROM admin_settings ORDER BY id ASC LIMIT 1');
     if (result.rows.length === 0) {
-      result = await pool.query(`
-        INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle)
-        VALUES ('SwamiCab', 'support@swamicab.com', 'INR (₹)', 'Asia/Kolkata', 10, 15, 30, 'Weekly')
-        RETURNING *
-      `);
+      result = await pool.query(`INSERT INTO admin_settings (app_name, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle) VALUES ('SwamiCab', 10, 15, 30, 'Weekly') RETURNING *`);
     }
     const row = result.rows[0];
     res.json({
@@ -412,276 +313,35 @@ app.get('/api/admin/settings', async (req, res) => {
       accountNumber: row.account_number || '',
       ifscCode: row.ifsc_code || '',
       bankName: row.bank_name || 'HDFC Bank',
-      upiId: row.upi_id || '',
-      autoCommissionRouting: row.auto_commission_routing,
-      twoFactorEnabled: row.two_factor_enabled,
-      apiKey: row.api_key,
-      webhookUrl: row.webhook_url
+      upiId: row.upi_id || ''
     });
   } catch (err) {
-    console.error('Error fetching admin settings:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch settings' });
   }
 });
 
 app.put('/api/admin/settings', async (req, res) => {
-  const {
-    appName, supportEmail, currency, timeZone,
-    commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle,
-    accountHolderName, accountNumber, ifscCode, bankName, upiId,
-    autoCommissionRouting, twoFactorEnabled, apiKey, webhookUrl
-  } = req.body;
-
+  const { appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId } = req.body;
   try {
     const checkRes = await pool.query('SELECT id FROM admin_settings ORDER BY id ASC LIMIT 1');
-    
     if (checkRes.rows.length === 0) {
-      await pool.query(`
-        INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id, auto_commission_routing, two_factor_enabled, api_key, webhook_url)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-      `, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, autoCommissionRouting, twoFactorEnabled, apiKey, webhookUrl]);
+      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId]);
     } else {
-      const id = checkRes.rows[0].id;
-      await pool.query(`
-        UPDATE admin_settings SET 
-          app_name = $1, support_email = $2, currency = $3, time_zone = $4,
-          commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8,
-          account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13,
-          auto_commission_routing = $14, two_factor_enabled = $15, api_key = $16, webhook_url = $17,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = $18
-      `, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, autoCommissionRouting, twoFactorEnabled, apiKey, webhookUrl, id]);
+      await pool.query(`UPDATE admin_settings SET app_name = $1, support_email = $2, currency = $3, time_zone = $4, commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8, account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13 WHERE id = $14`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, checkRes.rows[0].id]);
     }
-
     io.emit('settings_updated', req.body);
-    res.json({ success: true, message: 'Settings saved live to database successfully!' });
+    res.json({ success: true, message: 'Settings updated successfully!' });
   } catch (err) {
-    console.error('Error updating admin settings:', err);
     res.status(500).json({ success: false, error: 'Failed to update settings' });
   }
 });
-
-// ==================== DASHBOARD & STATS APIS ====================
-
-app.get('/api/admin/dashboard-data', async (req, res) => {
-  try {
-    const ridesCount = await pool.query("SELECT COUNT(*) FROM rides");
-    const usersCount = await pool.query("SELECT COUNT(*) FROM users WHERE role = 'rider'");
-    const activeDrivers = await pool.query("SELECT COUNT(*) FROM driver_profiles WHERE is_online = true");
-    const revenueRes = await pool.query("SELECT COALESCE(SUM(fare), 0) as total FROM rides WHERE status = 'Completed'");
-
-    const rides = await pool.query("SELECT * FROM rides ORDER BY created_at DESC LIMIT 10");
-    const drivers = await pool.query(`
-      SELECT u.id, u.full_name as name, u.phone_number as phone, dp.vehicle_type as "vehicleType", 
-             dp.is_online as "isOnline", dp.verification_status as "verificationStatus", dp.current_lat as lat, dp.current_lng as lng
-      FROM users u
-      LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-      WHERE u.role = 'driver'
-    `);
-
-    res.json({
-      stats: {
-        totalRides: parseInt(ridesCount.rows[0].count),
-        activeDrivers: parseInt(activeDrivers.rows[0].count),
-        totalUsers: parseInt(usersCount.rows[0].count),
-        todayRevenue: parseFloat(revenueRes.rows[0].total),
-        pendingVerifications: 0
-      },
-      rides: rides.rows,
-      drivers: drivers.rows
-    });
-  } catch (err) {
-    res.json({
-      stats: { totalRides: 0, activeDrivers: 0, totalUsers: 0, todayRevenue: 0, pendingVerifications: 0 },
-      rides: [],
-      drivers: []
-    });
-  }
-});
-
-app.get('/api/admin/drivers', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT u.id, u.id as "driverId", u.full_name as name, u.phone_number as phone, 
-             dp.vehicle_number as "vehicleNo", dp.rating, dp.is_online, dp.approval_status as status,
-             u.wallet_balance as "walletBalance"
-      FROM users u
-      LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-      WHERE u.role = 'driver'
-    `);
-    res.json(rows.map(d => ({
-      ...d,
-      status: d.is_online ? 'Online' : 'Offline'
-    })));
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/live-drivers', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT u.id, u.full_name as name, dp.current_lat as lat, dp.current_lng as lng, 
-             dp.vehicle_number as "plateNumber", dp.vehicle_model as "vehicleModel",
-             CASE WHEN dp.is_online THEN 'Available' ELSE 'Offline' END as status
-      FROM users u
-      JOIN driver_profiles dp ON u.id = dp.user_id
-      WHERE u.role = 'driver'
-    `);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/users', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT id, full_name as name, phone_number as phone, email, wallet_balance as "walletBalance", 
-             created_at as "createdAt"
-      FROM users WHERE role = 'rider'
-    `);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/rides', async (req, res) => {
-  try {
-    const { rows } = await pool.query("SELECT * FROM rides ORDER BY created_at DESC LIMIT 50");
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/verifications', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT u.id, u.id as "driverId", u.full_name as name, dp.verification_status as stage, 
-             dp.vehicle_model as vehicle, dp.vehicle_number as plate
-      FROM users u
-      JOIN driver_profiles dp ON u.id = dp.user_id
-      WHERE u.role = 'driver'
-    `);
-    res.json(rows.map(r => ({
-      ...r,
-      stage: r.stage === 'approved' ? 'Approved' : r.stage === 'rejected' ? 'Rejected' : 'Pending Review'
-    })));
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-// ==================== ADMIN PAYMENTS & WALLET APIS ====================
-
-app.get('/api/admin/payments/payouts', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT dw.id, dw.driver_id, u.full_name as driver_name, dw.amount, 
-             dw.gateway_status as status, dw.reference_id as "gatewayRef", 
-             TO_CHAR(dw.created_at, 'DD Mon YYYY, HH12:MI AM') as "processedAt"
-      FROM driver_withdrawals dw
-      LEFT JOIN users u ON dw.driver_id::text = u.id::text
-      ORDER BY dw.created_at DESC LIMIT 50
-    `);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/payments/withdrawals', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT dw.id, dw.driver_id as "driverId", u.full_name as "userName", 
-             dw.amount, dw.status, TO_CHAR(dw.created_at, 'HH12:MI AM') as "timeAge"
-      FROM driver_withdrawals dw
-      LEFT JOIN users u ON dw.driver_id::text = u.id::text
-      WHERE dw.status = 'Pending'
-      ORDER BY dw.created_at DESC
-    `);
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-app.get('/api/admin/payments/metrics', async (req, res) => {
-  try {
-    const revRes = await pool.query(`SELECT COALESCE(SUM(amount), 0) as total FROM driver_withdrawals`);
-    const queueRes = await pool.query(`SELECT COALESCE(SUM(amount), 0) as total FROM driver_withdrawals WHERE status = 'Pending'`);
-    
-    res.json({
-      totalRevenue: parseFloat(revRes.rows[0]?.total || 0),
-      payoutQueue: parseFloat(queueRes.rows[0]?.total || 0),
-      cashCollections: 0
-    });
-  } catch (err) {
-    res.json({ totalRevenue: 0, payoutQueue: 0, cashCollections: 0 });
-  }
-});
-
-app.post('/api/payout/transfer', async (req, res) => {
-  const { transferId, beneId, amount } = req.body;
-  try {
-    const baseUrl = CASHFREE_ENV === 'PRODUCTION'
-      ? 'https://payout-api.cashfree.com'
-      : 'https://payout-gamma.cashfree.com';
-
-    let response = { data: { status: 'SUCCESS', data: { referenceId: transferId } } };
-    if (CASHFREE_CLIENT_ID && CASHFREE_CLIENT_SECRET) {
-      response = await axios.post(`${baseUrl}/payout/v1/directTransfer`, {
-        amount,
-        transferId,
-        transferMode: 'imps',
-        beneId
-      }, {
-        headers: {
-          'X-Client-Id': CASHFREE_CLIENT_ID,
-          'X-Client-Secret': CASHFREE_CLIENT_SECRET,
-          'Content-Type': 'application/json'
-        }
-      }).catch(() => response);
-    }
-
-    await pool.query(
-      `UPDATE driver_withdrawals SET status = 'Completed', gateway_status = $1 WHERE transfer_id = $2`,
-      [response.data?.status || 'SUCCESS', transferId]
-    );
-
-    io.emit('payout_status_updated');
-    res.json({ success: true, referenceId: response.data?.data?.referenceId || transferId });
-  } catch (err) {
-    console.error('Payout transfer error:', err);
-    res.status(500).json({ success: false, error: 'Failed to execute payout transfer' });
-  }
-});
-
-app.post('/api/admin/payments/withdrawals/:id/reject', async (req, res) => {
-  const { id } = req.params;
-  try {
-    await pool.query(`UPDATE driver_withdrawals SET status = 'Rejected' WHERE id = $1`, [id]);
-    io.emit('payout_status_updated');
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: 'Failed to reject withdrawal' });
-  }
-});
-
-// ==================== RATE CARDS, ANALYTICS & SUPPORT ====================
 
 app.get('/api/admin/rate-cards', async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
     res.json(rows);
   } catch (err) {
-    res.json([
-      { id: 1, category: 'Mini', baseFare: 50, perKm: 12, perMin: 2, minFare: 80, nightSurge: true, peakHour: true, platformComm: 10 },
-      { id: 2, category: 'Sedan', baseFare: 80, perKm: 15, perMin: 3, minFare: 120, nightSurge: true, peakHour: true, platformComm: 10 },
-      { id: 3, category: 'SUV', baseFare: 120, perKm: 20, perMin: 4, minFare: 180, nightSurge: true, peakHour: true, platformComm: 10 }
-    ]);
+    res.json([]);
   }
 });
 
@@ -705,63 +365,62 @@ app.put('/api/admin/rate-cards', async (req, res) => {
   }
 });
 
-app.get('/api/admin/analytics', async (req, res) => {
-  res.json({
-    growthData: [
-      { month: 'Mon', Revenue: 4200, Expense: 1200 },
-      { month: 'Tue', Revenue: 5100, Expense: 1400 },
-      { month: 'Wed', Revenue: 6800, Expense: 1800 },
-      { month: 'Thu', Revenue: 5900, Expense: 1500 },
-      { month: 'Fri', Revenue: 8400, Expense: 2100 },
-      { month: 'Sat', Revenue: 9600, Expense: 2400 },
-      { month: 'Sun', Revenue: 8900, Expense: 2200 }
-    ],
-    paymentBreakdown: [
-      { name: 'UPI', value: 55 },
-      { name: 'Cash', value: 30 },
-      { name: 'Card', value: 15 }
-    ],
-    topAreas: [
-      { name: 'Koregaon Park, Pune', ridesCount: 340 },
-      { name: 'Hinjawadi Phase 1', ridesCount: 290 },
-      { name: 'Viman Nagar', ridesCount: 210 },
-      { name: 'FC Road', ridesCount: 180 }
-    ],
-    heatmapData: [
-      [0.2, 0.8, 0.4, 0.1, 0.9, 0.5],
-      [0.3, 0.9, 0.5, 0.2, 0.8, 0.6],
-      [0.4, 0.7, 0.6, 0.3, 0.9, 0.7],
-      [0.5, 0.8, 0.7, 0.4, 1.0, 0.8],
-      [0.6, 1.0, 0.8, 0.5, 0.9, 0.9],
-      [0.8, 0.9, 0.9, 0.7, 1.0, 1.0],
-      [0.7, 0.8, 0.7, 0.6, 0.9, 0.8]
-    ]
-  });
-});
+// ==================== REAL-TIME MARKET ANALYTICS ====================
 
-app.get('/api/admin/support/tickets', async (req, res) => {
+app.get('/api/admin/analytics', async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT * FROM support_tickets ORDER BY created_at DESC");
-    res.json(rows);
+    const growthRes = await pool.query(`
+      SELECT TO_CHAR(created_at, 'Dy') as month, COALESCE(SUM(fare), 0) as "Revenue", COALESCE(SUM(admin_commission), 0) as "Expense"
+      FROM rides WHERE status = 'Completed' AND created_at >= NOW() - INTERVAL '7 days'
+      GROUP BY TO_CHAR(created_at, 'Dy'), DATE(created_at) ORDER BY DATE(created_at) ASC
+    `);
+
+    const paymentRes = await pool.query(`SELECT payment_method as name, COUNT(*) * 100.0 / NULLIF(SUM(COUNT(*)) OVER(), 0) as value FROM rides GROUP BY payment_method`);
+    const topAreasRes = await pool.query(`SELECT pickup as name, COUNT(*) as "ridesCount" FROM rides GROUP BY pickup ORDER BY "ridesCount" DESC LIMIT 5`);
+
+    res.json({
+      growthData: growthRes.rows,
+      paymentBreakdown: paymentRes.rows,
+      topAreas: topAreasRes.rows
+    });
   } catch (err) {
-    res.json([]);
+    res.status(500).json({ success: false, error: 'Failed to fetch analytics' });
   }
 });
 
-// ==================== SOCKET.IO CONNECTION ====================
+app.get('/api/admin/dashboard-data', async (req, res) => {
+  try {
+    const ridesCount = await pool.query("SELECT COUNT(*) FROM rides");
+    const usersCount = await pool.query("SELECT COUNT(*) FROM users WHERE role = 'rider'");
+    const activeDrivers = await pool.query("SELECT COUNT(*) FROM driver_profiles WHERE is_online = true");
+    const revenueRes = await pool.query("SELECT COALESCE(SUM(fare), 0) as total FROM rides WHERE status = 'Completed'");
+    const rides = await pool.query("SELECT * FROM rides ORDER BY created_at DESC LIMIT 10");
+
+    res.json({
+      stats: {
+        totalRides: parseInt(ridesCount.rows[0].count),
+        activeDrivers: parseInt(activeDrivers.rows[0].count),
+        totalUsers: parseInt(usersCount.rows[0].count),
+        todayRevenue: parseFloat(revenueRes.rows[0].total),
+        pendingVerifications: 0
+      },
+      rides: rides.rows
+    });
+  } catch (err) {
+    res.status(500).json({ stats: { totalRides: 0, activeDrivers: 0, totalUsers: 0, todayRevenue: 0 }, rides: [] });
+  }
+});
+
+// ==================== SOCKET.IO & SERVER START ====================
 
 io.on('connection', (socket) => {
   console.log(`Socket Client Connected: ${socket.id}`);
-  socket.on('disconnect', () => {
-    console.log(`Socket Client Disconnected: ${socket.id}`);
-  });
+  socket.on('disconnect', () => console.log(`Socket Disconnected: ${socket.id}`));
 });
 
 app.get('/', (req, res) => {
-  res.json({ success: true, message: 'SwamiCab Backend API is live and running smoothly!' });
+  res.json({ success: true, message: 'SwamiCab Market-Ready Production Engine Online!' });
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`SwamiCab Backend Active Engine running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`SwamiCab Backend Active Engine running on port ${PORT}`));
