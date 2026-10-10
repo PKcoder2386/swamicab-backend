@@ -413,8 +413,21 @@ app.put('/api/admin/settings', async (req, res) => {
 app.get('/api/admin/rate-cards', async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
-    res.json(rows);
+    // Map database snake_case columns to frontend camelCase properties
+    const formattedRows = rows.map(card => ({
+      id: card.id,
+      category: card.category,
+      baseFare: parseFloat(card.base_fare || 50),
+      perKm: parseFloat(card.per_km || 12),
+      perMin: parseFloat(card.per_min || 2),
+      minFare: parseFloat(card.min_fare || 80),
+      nightSurge: card.night_surge || false,
+      peakHour: card.peak_hour || false,
+      platformComm: parseFloat(card.platform_comm || 10)
+    }));
+    res.json(formattedRows);
   } catch (err) {
+    console.error('Fetch rate cards error:', err);
     res.json([]);
   }
 });
@@ -428,13 +441,31 @@ app.put('/api/admin/rate-cards', async (req, res) => {
           INSERT INTO rate_cards (id, category, base_fare, per_km, per_min, min_fare, night_surge, peak_hour, platform_comm)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           ON CONFLICT (id) DO UPDATE SET 
-            base_fare = $3, per_km = $4, per_min = $5, min_fare = $6, night_surge = $7, peak_hour = $8, platform_comm = $9
-        `, [card.id, card.category, card.baseFare, card.perKm, card.perMin, card.minFare, card.nightSurge, card.peakHour, card.platformComm]);
+            category = EXCLUDED.category,
+            base_fare = EXCLUDED.base_fare,
+            per_km = EXCLUDED.per_km,
+            per_min = EXCLUDED.per_min,
+            min_fare = EXCLUDED.min_fare,
+            night_surge = EXCLUDED.night_surge,
+            peak_hour = EXCLUDED.peak_hour,
+            platform_comm = EXCLUDED.platform_comm
+        `, [
+          card.id, 
+          card.category, 
+          parseFloat(card.baseFare || 0), 
+          parseFloat(card.perKm || 0), 
+          parseFloat(card.perMin || 0), 
+          parseFloat(card.minFare || 0), 
+          card.nightSurge || false, 
+          card.peakHour || false, 
+          parseFloat(card.platformComm || 10)
+        ]);
       }
     }
     io.emit('rate_cards_updated');
     res.json({ success: true, message: 'Rate cards updated successfully' });
   } catch (err) {
+    console.error('Update rate cards error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
