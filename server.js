@@ -291,6 +291,93 @@ app.post('/api/webhooks/cashfree', express.json(), async (req, res) => {
   }
 });
 
+// ==================== RIDE COMMISSION SPLIT & WALLET PAYOUTS ====================
+
+// Complete ride: Keeps 10% admin commission and deposits 90% into driver wallet
+app.post('/api/rides/complete-ride', auth, async (req, res) => {
+  const { rideId, totalFare, driverId } = req.body;
+  try {
+    const adminCut = totalFare * 0.10; // 10% commission
+    const driverEarnings = totalFare - adminCut; // 90% to driver
+
+    await pool.query(
+      `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
+      [driverEarnings, driverId]
+    );
+
+    await pool.query(
+      `UPDATE rides SET status = 'Completed', fare = $1 WHERE ride_id = $2`,
+      [totalFare, rideId]
+    );
+
+    io.emit('ride_completed', { rideId, totalFare, driverEarnings });
+    res.json({ success: true, adminCut, driverEarnings });
+  } catch (err) {
+    console.error('Ride completion commission error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Driver bank withdrawal request (Direct Cashfree payout transfer for 90% earnings)
+app.post('/api/driver/withdraw', auth, async (req, res) => {
+  const { amount, bankAccountNumber, ifscCode, accountHolderName } = req.body;
+  const driverId = req.user.id;
+
+  try {
+    const userRes = await pool.query('SELECT wallet_balance FROM users WHERE id = \$1', [driverId]);
+    const currentBalance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
+
+    if (currentBalance < amount) {
+      return res.status(400).json({ success: false, error: 'Insufficient wallet balance for withdrawal' });
+    }
+
+    const transferId = `TR_${driverId}_${Date.now()}`;
+    const baseUrl = CASHFREE_ENV === 'PRODUCTION' 
+      ? 'https://payout-api.cashfree.com' 
+      : 'https://payout-gamma.cashfree.com';
+
+    let gatewayStatus = 'SUCCESS';
+
+    if (CASHFREE_CLIENT_ID && CASHFREE_CLIENT_SECRET) {
+      try {
+        const payoutRes = await axios.post(`${baseUrl}/payout/v1/directTransfer`, {
+          transferId,
+          amount,
+          transferMode: 'imps',
+          beneDetails: {
+            name: accountHolderName,
+            accountNumber: bankAccountNumber,
+            ifsc: ifscCode
+          }
+        }, {
+          headers: {
+            'X-Client-Id': CASHFREE_CLIENT_ID,
+            'X-Client-Secret': CASHFREE_CLIENT_SECRET,
+            'Content-Type': 'application/json'
+          }
+        });
+        gatewayStatus = payoutRes.data?.status || 'SUCCESS';
+      } catch (gatewayErr) {
+        console.error('Cashfree payout error:', gatewayErr.message);
+        gatewayStatus = 'PENDING_REVIEW';
+      }
+    }
+
+    await pool.query('UPDATE users SET wallet_balance = wallet_balance - \$1 WHERE id = \$2', [amount, driverId]);
+    await pool.query(
+      `INSERT INTO driver_withdrawals (driver_id, amount, transfer_id, gateway_status, status)
+       VALUES ($1, $2, $3, $4, 'Pending')`,
+      [driverId, amount, transferId, gatewayStatus]
+    );
+
+    io.emit('payout_requested');
+    res.json({ success: true, message: 'Withdrawal request submitted successfully!', transferId });
+  } catch (err) {
+    console.error('Withdrawal error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==================== ADMIN SETTINGS APIS ====================
 
 app.get('/api/admin/settings', async (req, res) => {
