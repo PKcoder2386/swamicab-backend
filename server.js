@@ -54,6 +54,41 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
+// ==================== AUTO-MIGRATE DATABASE TABLES ON STARTUP ====================
+async function initializeDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS rate_cards (
+        id SERIAL PRIMARY KEY,
+        category VARCHAR(50) UNIQUE,
+        base_fare NUMERIC(10,2) DEFAULT 50.00,
+        per_km NUMERIC(10,2) DEFAULT 18.00,
+        per_km_local NUMERIC(10,2) DEFAULT 18.00,
+        per_km_outstation NUMERIC(10,2) DEFAULT 15.00,
+        per_min NUMERIC(10,2) DEFAULT 2.00,
+        min_fare NUMERIC(10,2) DEFAULT 80.00,
+        night_surge BOOLEAN DEFAULT TRUE,
+        peak_hour BOOLEAN DEFAULT TRUE,
+        platform_comm NUMERIC(5,2) DEFAULT 10.00,
+        is_outstation_allowed BOOLEAN DEFAULT TRUE
+      );
+    `);
+
+    // Ensure columns exist if table was already created previously
+    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 18.00;`);
+    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_outstation NUMERIC(10,2) DEFAULT 15.00;`);
+    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS is_outstation_allowed BOOLEAN DEFAULT TRUE;`);
+    await pool.query(`ALTER TABLE rate_cards DROP CONSTRAINT IF EXISTS rate_cards_category_key;`);
+    await pool.query(`ALTER TABLE rate_cards ADD CONSTRAINT rate_cards_category_key UNIQUE (category);`);
+
+    console.log('✅ Database rate_cards schema auto-verified and migrated successfully.');
+  } catch (err) {
+    console.error('⚠️ Database Auto-Migration Notice:', err.message);
+  }
+}
+
+initializeDatabase();
+
 const normalizePhone = (num) => String(num || '').replace(/\D/g, '').slice(-10);
 const signToken = (user) => jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '30d' });
 
@@ -455,7 +490,7 @@ app.put('/api/admin/rate-cards', async (req, res) => {
     io.emit('rate_cards_updated');
     res.json({ success: true, message: 'Rate cards updated and persisted successfully' });
   } catch (err) {
-    console.error('Update rate cards error:', err);
+    console.error('❌ Update rate cards error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
