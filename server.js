@@ -74,7 +74,6 @@ async function initializeDatabase() {
       );
     `);
 
-    // Ensure columns exist if table was already created previously
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 18.00;`);
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_outstation NUMERIC(10,2) DEFAULT 15.00;`);
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS is_outstation_allowed BOOLEAN DEFAULT TRUE;`);
@@ -456,8 +455,45 @@ app.get('/api/admin/rate-cards', async (req, res) => {
 app.put('/api/admin/rate-cards', async (req, res) => {
   const { rateCards } = req.body;
   try {
-    if (Array.isArray(rateCards)) {
-      for (const card of rateCards) {
+    if (!Array.isArray(rateCards)) {
+      return res.status(400).json({ success: false, error: 'rateCards payload must be an array' });
+    }
+
+    for (const card of rateCards) {
+      if (!card.category) continue;
+
+      if (card.id) {
+        // Safe update by ID if present
+        await pool.query(`
+          UPDATE rate_cards 
+          SET category = $1, 
+              base_fare = $2, 
+              per_km = $3, 
+              per_km_local = $4, 
+              per_min = $5, 
+              min_fare = $6, 
+              night_surge = $7, 
+              peak_hour = $8, 
+              platform_comm = $9, 
+              per_km_outstation = $10, 
+              is_outstation_allowed = $11
+          WHERE id = $12
+        `, [
+          card.category,
+          parseFloat(card.baseFare || 0),
+          parseFloat(card.perKmLocal || card.perKm || 18),
+          parseFloat(card.perKmLocal || card.perKm || 18),
+          parseFloat(card.perMin || 2),
+          parseFloat(card.minFare || 80),
+          Boolean(card.nightSurge),
+          Boolean(card.peakHour),
+          parseFloat(card.platformComm || 10),
+          parseFloat(card.perKmOutstation || 15),
+          card.isOutstationAllowed ?? true,
+          card.id
+        ]);
+      } else {
+        // Fallback upsert by category
         await pool.query(`
           INSERT INTO rate_cards (category, base_fare, per_km, per_km_local, per_min, min_fare, night_surge, peak_hour, platform_comm, per_km_outstation, is_outstation_allowed)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -473,24 +509,25 @@ app.put('/api/admin/rate-cards', async (req, res) => {
             per_km_outstation = EXCLUDED.per_km_outstation,
             is_outstation_allowed = EXCLUDED.is_outstation_allowed
         `, [
-          card.category, 
-          parseFloat(card.baseFare || 0), 
-          parseFloat(card.perKmLocal || card.perKm || 18), 
-          parseFloat(card.perKmLocal || card.perKm || 18), 
-          parseFloat(card.perMin || 2), 
-          parseFloat(card.minFare || 80), 
-          card.nightSurge || false, 
-          card.peakHour || false, 
+          card.category,
+          parseFloat(card.baseFare || 0),
+          parseFloat(card.perKmLocal || card.perKm || 18),
+          parseFloat(card.perKmLocal || card.perKm || 18),
+          parseFloat(card.perMin || 2),
+          parseFloat(card.minFare || 80),
+          Boolean(card.nightSurge),
+          Boolean(card.peakHour),
           parseFloat(card.platformComm || 10),
           parseFloat(card.perKmOutstation || 15),
           card.isOutstationAllowed ?? true
         ]);
       }
     }
+
     io.emit('rate_cards_updated');
     res.json({ success: true, message: 'Rate cards updated and persisted successfully' });
   } catch (err) {
-    console.error('❌ Update rate cards error:', err.message);
+    console.error('❌ Update rate cards error details:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
