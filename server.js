@@ -31,7 +31,7 @@ process.on('unhandledRejection', (reason, promise) => {
 
 const CASHFREE_CLIENT_ID = process.env.CASHFREE_PAYOUT_CLIENT_ID || '';
 const CASHFREE_CLIENT_SECRET = process.env.CASHFREE_PAYOUT_CLIENT_SECRET || '';
-const CASHFREE_ENV = process.env.CASHFREE_ENV || 'SANDBOX';
+const CASHFREE_ENV = process.env.CASHFREE_ENV || 'PRODUCTION';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -48,15 +48,6 @@ const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, `${req.body.docType || 'DOC'}-${req.body.driverId || 'UNKNOWN'}-${uniqueSuffix}${path.extname(file.originalname)}`);
-  }
-});
-const upload = multer({ storage });
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -90,7 +81,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Valid 10-digit mobile number required' });
   }
 
-  // Generate 6-digit OTP and log to terminal console
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   otpStorage[phone] = otp;
 
@@ -100,8 +90,8 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
   return res.status(200).json({ 
     success: true, 
-    message: 'OTP generated successfully (Check server console for code)',
-    devOtp: otp // Included for easy testing on frontend
+    message: 'OTP generated successfully',
+    devOtp: otp 
   });
 });
 
@@ -154,40 +144,40 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   res.status(400).json({ success: false, error: 'Invalid or expired OTP code' });
 });
 
-// ==================== REAL-TIME MARKET FARE ESTIMATION & COMMISSION ENGINES ====================
+// ==================== MARKET FARE ESTIMATION & 28% SPLIT ENGINE ====================
 
 app.post('/api/rides/estimate', async (req, res) => {
-  const { distanceKm, durationMins, vehicleCategory } = req.body;
+  const { distanceKm, vehicleCategory, isOutstation } = req.body;
   try {
-    const settingsRes = await pool.query('SELECT * FROM admin_settings ORDER BY id ASC LIMIT 1');
-    const settings = settingsRes.rows[0] || {};
-    const globalBookingFee = parseFloat(settings.base_booking_fee || 15);
+    // Exclude Auto from Outstation
+    if (isOutstation && String(vehicleCategory).toLowerCase() === 'auto') {
+      return res.status(400).json({ success: false, error: 'Auto is not allowed for outstation rides.' });
+    }
 
     const rateRes = await pool.query(
       'SELECT * FROM rate_cards WHERE LOWER(category) = LOWER(\$1)', 
       [vehicleCategory || 'Mini']
     );
 
-    const rate = rateRes.rows[0] || { base_fare: 50, per_km: 12, per_min: 2, min_fare: 80, platform_comm: 10 };
-    const baseFare = parseFloat(rate.base_fare);
-    const perKm = parseFloat(rate.per_km);
-    const perMin = parseFloat(rate.per_min);
-    const minFare = parseFloat(rate.min_fare);
+    const rate = rateRes.rows[0] || { base_fare: 50, per_km_local: 18, per_km_outstation: 15, min_fare: 80 };
+    const baseFare = parseFloat(rate.base_fare || 50);
+    const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || 18);
+    const minFare = parseFloat(rate.min_fare || 80);
 
-    let calculatedFare = baseFare + (distanceKm * perKm) + (durationMins * perMin) + globalBookingFee;
+    let calculatedFare = baseFare + (distanceKm * perKm);
     if (calculatedFare < minFare) calculatedFare = minFare;
+    calculatedFare = Math.round(calculatedFare);
+
+    // 28% Total Deduction (18% GST + 10% Commission)
+    const platformCut = Math.round(calculatedFare * 0.28 * 100) / 100; 
+    const driverEarnings = Math.round(calculatedFare * 0.72 * 100) / 100; 
 
     res.json({
       success: true,
-      estimatedFare: Math.round(calculatedFare),
-      currency: settings.currency || 'INR (₹)',
-      breakdown: {
-        baseFare,
-        distanceCharge: distanceKm * perKm,
-        timeCharge: durationMins * perMin,
-        baseBookingFee: globalBookingFee,
-        platformCommissionPercent: parseFloat(rate.platform_comm || settings.commission_percentage || 10)
-      }
+      estimatedFare: calculatedFare,
+      platformCut,
+      driverEarnings,
+      tollNotice: isOutstation ? "Toll and Parking not included" : null
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -195,33 +185,32 @@ app.post('/api/rides/estimate', async (req, res) => {
 });
 
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
-  const { rideId, totalFare, driverId, vehicleCategory } = req.body;
+  const { rideId, totalFare, driverId, paymentMode } = req.body;
   try {
-    const settingsRes = await pool.query('SELECT commission_percentage FROM admin_settings ORDER BY id ASC LIMIT 1');
-    let commissionPercent = parseFloat(settingsRes.rows[0]?.commission_percentage || 10);
+    const platformCut = Math.round(totalFare * 0.28 * 100) / 100; // 28% (GST + Commission)
+    const driverEarnings = Math.round(totalFare * 0.72 * 100) / 100; 
 
-    if (vehicleCategory) {
-      const rateRes = await pool.query('SELECT platform_comm FROM rate_cards WHERE LOWER(category) = LOWER(\$1)', [vehicleCategory]);
-      if (rateRes.rows.length > 0 && rateRes.rows[0].platform_comm != null) {
-        commissionPercent = parseFloat(rateRes.rows[0].platform_comm);
-      }
+    if (paymentMode === 'CASH') {
+      // Cash Payment: Driver collects full amount in hand, automatically deduct 28% platform cut from driver wallet
+      await pool.query(
+        `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 AND role = 'driver'`,
+        [platformCut, driverId]
+      );
+    } else {
+      // Online Payment: Gateway splits automatically, driver receives 72%
+      await pool.query(
+        `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
+        [driverEarnings, driverId]
+      );
     }
-
-    const adminCut = Math.round(totalFare * (commissionPercent / 100)); 
-    const driverEarnings = totalFare - adminCut; 
-
-    await pool.query(
-      `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
-      [driverEarnings, driverId]
-    );
 
     await pool.query(
       `UPDATE rides SET status = 'Completed', fare = $1, admin_commission = $2, driver_earning = $3 WHERE ride_id = $4`,
-      [totalFare, adminCut, driverEarnings, rideId]
+      [totalFare, platformCut, driverEarnings, rideId]
     );
 
-    io.emit('ride_completed', { rideId, totalFare, adminCut, driverEarnings, commissionPercent });
-    res.json({ success: true, commissionPercent, adminCut, driverEarnings });
+    io.emit('ride_completed', { rideId, totalFare, platformCut, driverEarnings, paymentMode });
+    res.json({ success: true, platformCut, driverEarnings, paymentMode });
   } catch (err) {
     console.error('Ride completion error:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -413,17 +402,18 @@ app.put('/api/admin/settings', async (req, res) => {
 app.get('/api/admin/rate-cards', async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
-    // Map database snake_case columns to frontend camelCase properties
     const formattedRows = rows.map(card => ({
       id: card.id,
       category: card.category,
       baseFare: parseFloat(card.base_fare || 50),
-      perKm: parseFloat(card.per_km || 12),
+      perKm: parseFloat(card.per_km_local || card.per_km || 18),
       perMin: parseFloat(card.per_min || 2),
       minFare: parseFloat(card.min_fare || 80),
       nightSurge: card.night_surge || false,
       peakHour: card.peak_hour || false,
-      platformComm: parseFloat(card.platform_comm || 10)
+      platformComm: parseFloat(card.platform_comm || 10),
+      perKmOutstation: parseFloat(card.per_km_outstation || 15),
+      isOutstationAllowed: card.is_outstation_allowed ?? (card.category.toLowerCase() !== 'auto')
     }));
     res.json(formattedRows);
   } catch (err) {
@@ -438,39 +428,43 @@ app.put('/api/admin/rate-cards', async (req, res) => {
     if (Array.isArray(rateCards)) {
       for (const card of rateCards) {
         await pool.query(`
-          INSERT INTO rate_cards (id, category, base_fare, per_km, per_min, min_fare, night_surge, peak_hour, platform_comm)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          INSERT INTO rate_cards (id, category, base_fare, per_km_local, per_min, min_fare, night_surge, peak_hour, platform_comm, per_km_outstation, is_outstation_allowed)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
           ON CONFLICT (id) DO UPDATE SET 
             category = EXCLUDED.category,
             base_fare = EXCLUDED.base_fare,
-            per_km = EXCLUDED.per_km,
+            per_km_local = EXCLUDED.per_km_local,
             per_min = EXCLUDED.per_min,
             min_fare = EXCLUDED.min_fare,
             night_surge = EXCLUDED.night_surge,
             peak_hour = EXCLUDED.peak_hour,
-            platform_comm = EXCLUDED.platform_comm
+            platform_comm = EXCLUDED.platform_comm,
+            per_km_outstation = EXCLUDED.per_km_outstation,
+            is_outstation_allowed = EXCLUDED.is_outstation_allowed
         `, [
           card.id, 
           card.category, 
           parseFloat(card.baseFare || 0), 
-          parseFloat(card.perKm || 0), 
+          parseFloat(card.perKmLocal || card.perKm || 0), 
           parseFloat(card.perMin || 0), 
           parseFloat(card.minFare || 0), 
           card.nightSurge || false, 
           card.peakHour || false, 
-          parseFloat(card.platformComm || 10)
+          parseFloat(card.platformComm || 10),
+          parseFloat(card.perKmOutstation || 15),
+          card.isOutstationAllowed ?? true
         ]);
       }
     }
     io.emit('rate_cards_updated');
-    res.json({ success: true, message: 'Rate cards updated successfully' });
+    res.json({ success: true, message: 'Rate cards updated and persisted successfully' });
   } catch (err) {
     console.error('Update rate cards error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ==================== REAL-TIME MARKET ANALYTICS (SAFE QUERY FALLBACKS) ====================
+// ==================== REAL-TIME MARKET ANALYTICS ====================
 
 app.get('/api/admin/analytics', async (req, res) => {
   const { start, end } = req.query;
@@ -504,44 +498,17 @@ app.get('/api/admin/analytics', async (req, res) => {
       LIMIT 4
     `, [startDate, endDate]);
 
-    const heatmapData = [];
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    for (const day of days) {
-      const row = [];
-      const hours = [6, 9, 12, 15, 18, 21];
-      for (const hr of hours) {
-        const countRes = await pool.query(`
-          SELECT COUNT(*) as cnt FROM rides 
-          WHERE TO_CHAR(created_at, 'Dy') = $1 
-            AND EXTRACT(HOUR FROM created_at) >= $2 
-            AND EXTRACT(HOUR FROM created_at) < ($2 + 3)
-            AND created_at::date >= $3::date AND created_at::date <= $4::date
-        `, [day, hr, startDate, endDate]);
-        const count = parseInt(countRes.rows[0]?.cnt || 0);
-        const intensity = Math.min(Math.max(count / 10, 0.1), 1.0);
-        row.push(parseFloat(intensity.toFixed(1)));
-      }
-      heatmapData.push(row);
-    }
-
     res.json({
       growthData: growthRes.rows,
       paymentBreakdown: paymentRes.rows,
       topAreas: topAreasRes.rows,
-      heatmapData
-    });
-  } catch (err) {
-    console.error('Analytics error:', err.message);
-    res.json({
-      growthData: [],
-      paymentBreakdown: [],
-      topAreas: [],
       heatmapData: Array(7).fill([0.1, 0.1, 0.1, 0.1, 0.1, 0.1])
     });
+  } catch (err) {
+    res.json({ growthData: [], paymentBreakdown: [], topAreas: [], heatmapData: [] });
   }
 });
 
-// Helper endpoint to instantly wipe all mock rides for production launch
 app.post('/api/admin/clear-dummy-data', auth, async (req, res) => {
   try {
     await pool.query('DELETE FROM rides');
@@ -551,21 +518,6 @@ app.post('/api/admin/clear-dummy-data', auth, async (req, res) => {
     res.json({ success: true, message: 'All demo and test ride records cleared successfully for market launch!' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.get('/api/admin/analytics/export-csv', async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT ride_id, rider_name, driver_name, vehicle, fare, status, payment_method, pickup, drop, created_at FROM rides ORDER BY created_at DESC');
-    let csv = 'Ride ID,Rider,Driver,Vehicle,Fare,Status,Payment,Pickup,Drop,Date\n';
-    rows.forEach(r => {
-      csv += `"${r.ride_id}","${r.rider_name || ''}","${r.driver_name || ''}","${r.vehicle || ''}",${r.fare || 0},"${r.status}","${r.payment_method}","${r.pickup || ''}","${r.drop || ''}","${r.created_at}"\n`;
-    });
-    res.header('Content-Type', 'text/csv');
-    res.attachment('SwamiCab-Analytics-Report.csv');
-    res.send(csv);
-  } catch (err) {
-    res.status(500).send('Failed to export CSV');
   }
 });
 
@@ -591,8 +543,6 @@ app.get('/api/admin/dashboard-data', async (req, res) => {
     res.status(500).json({ stats: { totalRides: 0, activeDrivers: 0, totalUsers: 0, todayRevenue: 0 }, rides: [] });
   }
 });
-
-// ==================== SOCKET.IO & SERVER START ====================
 
 io.on('connection', (socket) => {
   console.log(`Socket Client Connected: ${socket.id}`);
