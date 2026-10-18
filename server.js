@@ -161,7 +161,7 @@ app.post('/api/rides/estimate', async (req, res) => {
 
     const rate = rateRes.rows[0] || { base_fare: 50, per_km_local: 18, per_km_outstation: 15, min_fare: 80 };
     const baseFare = parseFloat(rate.base_fare || 50);
-    const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || 18);
+    const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || rate.per_km || 18);
     const minFare = parseFloat(rate.min_fare || 80);
 
     let calculatedFare = baseFare + (distanceKm * perKm);
@@ -428,11 +428,11 @@ app.put('/api/admin/rate-cards', async (req, res) => {
     if (Array.isArray(rateCards)) {
       for (const card of rateCards) {
         await pool.query(`
-          INSERT INTO rate_cards (id, category, base_fare, per_km_local, per_min, min_fare, night_surge, peak_hour, platform_comm, per_km_outstation, is_outstation_allowed)
+          INSERT INTO rate_cards (category, base_fare, per_km, per_km_local, per_min, min_fare, night_surge, peak_hour, platform_comm, per_km_outstation, is_outstation_allowed)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-          ON CONFLICT (id) DO UPDATE SET 
-            category = EXCLUDED.category,
+          ON CONFLICT (category) DO UPDATE SET 
             base_fare = EXCLUDED.base_fare,
+            per_km = EXCLUDED.per_km,
             per_km_local = EXCLUDED.per_km_local,
             per_min = EXCLUDED.per_min,
             min_fare = EXCLUDED.min_fare,
@@ -442,12 +442,12 @@ app.put('/api/admin/rate-cards', async (req, res) => {
             per_km_outstation = EXCLUDED.per_km_outstation,
             is_outstation_allowed = EXCLUDED.is_outstation_allowed
         `, [
-          card.id, 
           card.category, 
           parseFloat(card.baseFare || 0), 
-          parseFloat(card.perKmLocal || card.perKm || 0), 
-          parseFloat(card.perMin || 0), 
-          parseFloat(card.minFare || 0), 
+          parseFloat(card.perKmLocal || card.perKm || 18), 
+          parseFloat(card.perKmLocal || card.perKm || 18), 
+          parseFloat(card.perMin || 2), 
+          parseFloat(card.minFare || 80), 
           card.nightSurge || false, 
           card.peakHour || false, 
           parseFloat(card.platformComm || 10),
