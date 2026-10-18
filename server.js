@@ -149,7 +149,6 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 app.post('/api/rides/estimate', async (req, res) => {
   const { distanceKm, vehicleCategory, isOutstation } = req.body;
   try {
-    // Exclude Auto from Outstation
     if (isOutstation && String(vehicleCategory).toLowerCase() === 'auto') {
       return res.status(400).json({ success: false, error: 'Auto is not allowed for outstation rides.' });
     }
@@ -168,7 +167,6 @@ app.post('/api/rides/estimate', async (req, res) => {
     if (calculatedFare < minFare) calculatedFare = minFare;
     calculatedFare = Math.round(calculatedFare);
 
-    // 28% Total Deduction (18% GST + 10% Commission)
     const platformCut = Math.round(calculatedFare * 0.28 * 100) / 100; 
     const driverEarnings = Math.round(calculatedFare * 0.72 * 100) / 100; 
 
@@ -187,17 +185,15 @@ app.post('/api/rides/estimate', async (req, res) => {
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
   const { rideId, totalFare, driverId, paymentMode } = req.body;
   try {
-    const platformCut = Math.round(totalFare * 0.28 * 100) / 100; // 28% (GST + Commission)
+    const platformCut = Math.round(totalFare * 0.28 * 100) / 100; 
     const driverEarnings = Math.round(totalFare * 0.72 * 100) / 100; 
 
     if (paymentMode === 'CASH') {
-      // Cash Payment: Driver collects full amount in hand, automatically deduct 28% platform cut from driver wallet
       await pool.query(
         `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 AND role = 'driver'`,
         [platformCut, driverId]
       );
     } else {
-      // Online Payment: Gateway splits automatically, driver receives 72%
       await pool.query(
         `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
         [driverEarnings, driverId]
