@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS driver_withdrawals (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Rides Table with Real-time Financial Breakdown
+-- Rides Table with Real-time Financial Breakdown (28% Split)
 CREATE TABLE IF NOT EXISTS rides (
     id SERIAL PRIMARY KEY,
     ride_id VARCHAR(50) UNIQUE,
@@ -90,17 +90,20 @@ CREATE TABLE IF NOT EXISTS rides (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Rate Cards Table (Dynamic Category Pricing)
+-- Rate Cards Table (Dynamic Local & Outstation Category Pricing)
 CREATE TABLE IF NOT EXISTS rate_cards (
     id SERIAL PRIMARY KEY,
     category VARCHAR(50) UNIQUE,
     base_fare NUMERIC(10,2) DEFAULT 50.00,
-    per_km NUMERIC(10,2) DEFAULT 12.00,
+    per_km NUMERIC(10,2) DEFAULT 18.00,
+    per_km_local NUMERIC(10,2) DEFAULT 18.00,
+    per_km_outstation NUMERIC(10,2) DEFAULT 15.00,
     per_min NUMERIC(10,2) DEFAULT 2.00,
     min_fare NUMERIC(10,2) DEFAULT 80.00,
     night_surge BOOLEAN DEFAULT TRUE,
     peak_hour BOOLEAN DEFAULT TRUE,
-    platform_comm NUMERIC(5,2) DEFAULT 10.00
+    platform_comm NUMERIC(5,2) DEFAULT 10.00,
+    is_outstation_allowed BOOLEAN DEFAULT TRUE
 );
 
 -- Saved Places
