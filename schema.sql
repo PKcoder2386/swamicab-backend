@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS driver_withdrawals (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Driver Incentive Progress (12-Hour / 10-Ride Shift Window)
+CREATE TABLE IF NOT EXISTS driver_incentive_progress (
+    id SERIAL PRIMARY KEY,
+    driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+    window_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    window_end TIMESTAMP DEFAULT CURRENT_TIMESTAMP + INTERVAL '12 hours',
+    rides_completed INT DEFAULT 0,
+    status VARCHAR(20) CHECK (status IN ('Active', 'Completed', 'Expired')) DEFAULT 'Active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Rides Table with Real-time Financial Breakdown (28% Split)
 CREATE TABLE IF NOT EXISTS rides (
     id SERIAL PRIMARY KEY,
