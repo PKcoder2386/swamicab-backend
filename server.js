@@ -74,13 +74,25 @@ async function initializeDatabase() {
       );
     `);
 
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS driver_incentive_progress (
+          id SERIAL PRIMARY KEY,
+          driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+          window_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          window_end TIMESTAMP DEFAULT CURRENT_TIMESTAMP + INTERVAL '12 hours',
+          rides_completed INT DEFAULT 0,
+          status VARCHAR(20) CHECK (status IN ('Active', 'Completed', 'Expired')) DEFAULT 'Active',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 18.00;`);
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_outstation NUMERIC(10,2) DEFAULT 15.00;`);
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS is_outstation_allowed BOOLEAN DEFAULT TRUE;`);
     await pool.query(`ALTER TABLE rate_cards DROP CONSTRAINT IF EXISTS rate_cards_category_key;`);
     await pool.query(`ALTER TABLE rate_cards ADD CONSTRAINT rate_cards_category_key UNIQUE (category);`);
 
-    console.log('✅ Database rate_cards schema auto-verified and migrated successfully.');
+    console.log('✅ Database schemas and incentive tracking table auto-verified and migrated successfully.');
   } catch (err) {
     console.error('⚠️ Database Auto-Migration Notice:', err.message);
   }
@@ -144,7 +156,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
     delete otpStorage[phone];
 
     try {
-      let userResult = await pool.query('SELECT * FROM users WHERE phone_number = \$1', [phone]);
+      let userResult = await pool.query('SELECT * FROM users WHERE phone_number = $1', [phone]);
       let user;
 
       if (userResult.rows.length === 0) {
@@ -155,7 +167,7 @@ app.post('/api/auth/verify-otp', async (req, res) => {
         user = insertRes.rows[0];
       } else {
         user = userResult.rows[0];
-        await pool.query('UPDATE users SET is_verified = true WHERE id = \$1', [user.id]);
+        await pool.query('UPDATE users SET is_verified = true WHERE id = $1', [user.id]);
       }
 
       return res.json({
@@ -188,7 +200,7 @@ app.post('/api/rides/estimate', async (req, res) => {
     }
 
     const rateRes = await pool.query(
-      'SELECT * FROM rate_cards WHERE LOWER(category) = LOWER(\$1)', 
+      'SELECT * FROM rate_cards WHERE LOWER(category) = LOWER($1)', 
       [vehicleCategory || 'Mini']
     );
 
@@ -216,6 +228,74 @@ app.post('/api/rides/estimate', async (req, res) => {
   }
 });
 
+// ==================== DRIVER INCENTIVE TRACKING & RECYCLING ENGINE (12-HR / 10 RIDES) ====================
+async function trackAndAwardIncentive(driverId, clientPool) {
+  const now = new Date();
+
+  let shiftRes = await clientPool.query(
+    `SELECT * FROM driver_incentive_progress 
+     WHERE driver_id = $1 AND status = 'Active' 
+     ORDER BY id DESC LIMIT 1`,
+    [driverId]
+  );
+
+  let shift;
+
+  if (shiftRes.rows.length === 0) {
+    const newShiftRes = await clientPool.query(
+      `INSERT INTO driver_incentive_progress (driver_id, window_start, window_end, rides_completed, status)
+       VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '12 hours', 1, 'Active')
+       RETURNING *`,
+      [driverId]
+    );
+    shift = newShiftRes.rows[0];
+  } else {
+    shift = shiftRes.rows[0];
+    const windowEnd = new Date(shift.window_end);
+
+    if (now > windowEnd) {
+      // Window expired without hitting 10 rides -> Mark expired and recycle a new 12-hr window
+      await clientPool.query(
+        `UPDATE driver_incentive_progress SET status = 'Expired' WHERE id = $1`,
+        [shift.id]
+      );
+
+      const freshShiftRes = await clientPool.query(
+        `INSERT INTO driver_incentive_progress (driver_id, window_start, window_end, rides_completed, status)
+         VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '12 hours', 1, 'Active')
+         RETURNING *`,
+        [driverId]
+      );
+      shift = freshShiftRes.rows[0];
+    } else {
+      const updatedRides = shift.rides_completed + 1;
+      
+      if (updatedRides >= 10) {
+        // Milestone reached! Mark completed and credit ₹200 bonus
+        await clientPool.query(
+          `UPDATE driver_incentive_progress 
+           SET rides_completed = $1, status = 'Completed' 
+           WHERE id = $2`,
+          [updatedRides, shift.id]
+        );
+
+        await clientPool.query(
+          `UPDATE users SET wallet_balance = wallet_balance + 200 WHERE id = $1 AND role = 'driver'`,
+          [driverId]
+        );
+
+        return { incentiveUnlocked: true, reward: 200, currentRides: updatedRides };
+      } else {
+        await clientPool.query(
+          `UPDATE driver_incentive_progress SET rides_completed = $1 WHERE id = $2`,
+          [updatedRides, shift.id]
+        );
+      }
+    }
+  }
+  return { incentiveUnlocked: false, currentRides: shift.rides_completed };
+}
+
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
   const { rideId, totalFare, driverId, paymentMode } = req.body;
   try {
@@ -239,8 +319,11 @@ app.post('/api/rides/complete-ride', auth, async (req, res) => {
       [totalFare, platformCut, driverEarnings, rideId]
     );
 
-    io.emit('ride_completed', { rideId, totalFare, platformCut, driverEarnings, paymentMode });
-    res.json({ success: true, platformCut, driverEarnings, paymentMode });
+    // Trigger 12-hour shift incentive check & recycling logic
+    const incentiveResult = await trackAndAwardIncentive(driverId, pool);
+
+    io.emit('ride_completed', { rideId, totalFare, platformCut, driverEarnings, paymentMode, incentiveResult });
+    res.json({ success: true, platformCut, driverEarnings, paymentMode, incentiveResult });
   } catch (err) {
     console.error('Ride completion error:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -254,7 +337,7 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
     const cancellationFee = parseFloat(settingsRes.rows[0]?.cancellation_fee || 30);
 
     if (cancelledBy === 'rider' && userId) {
-      await pool.query('UPDATE users SET wallet_balance = wallet_balance - \$1 WHERE id = \$2', [cancellationFee, userId]);
+      await pool.query('UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2', [cancellationFee, userId]);
     }
 
     await pool.query(`UPDATE rides SET status = 'Cancelled' WHERE ride_id = $1`, [rideId]);
@@ -270,7 +353,7 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
 app.post('/api/admin/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    let result = await pool.query("SELECT * FROM users WHERE LOWER(email) = LOWER(\$1) AND role = 'admin'", [email]);
+    let result = await pool.query("SELECT * FROM users WHERE LOWER(email) = LOWER($1) AND role = 'admin'", [email]);
 
     if (result.rows.length === 0 && email === 'admin@swamicab.com') {
       const defaultPasswordHash = await bcrypt.hash('SwamiCab@2026!Pune', 10);
@@ -353,7 +436,7 @@ app.post('/api/driver/withdraw', auth, async (req, res) => {
   const driverId = req.user.id;
 
   try {
-    const userRes = await pool.query('SELECT wallet_balance FROM users WHERE id = \$1', [driverId]);
+    const userRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [driverId]);
     const currentBalance = parseFloat(userRes.rows[0]?.wallet_balance || 0);
 
     if (currentBalance < amount) {
@@ -374,7 +457,7 @@ app.post('/api/driver/withdraw', auth, async (req, res) => {
       }
     }
 
-    await pool.query('UPDATE users SET wallet_balance = wallet_balance - \$1 WHERE id = \$2', [amount, driverId]);
+    await pool.query('UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2', [amount, driverId]);
     await pool.query(`INSERT INTO driver_withdrawals (driver_id, amount, transfer_id, gateway_status, status) VALUES ($1, $2, $3, $4, 'Pending')`, [driverId, amount, transferId, gatewayStatus]);
 
     io.emit('payout_requested');
@@ -463,7 +546,6 @@ app.put('/api/admin/rate-cards', async (req, res) => {
       if (!card.category) continue;
 
       if (card.id) {
-        // Safe update by ID if present
         await pool.query(`
           UPDATE rate_cards 
           SET category = $1, 
@@ -493,7 +575,6 @@ app.put('/api/admin/rate-cards', async (req, res) => {
           card.id
         ]);
       } else {
-        // Fallback upsert by category
         await pool.query(`
           INSERT INTO rate_cards (category, base_fare, per_km, per_km_local, per_min, min_fare, night_surge, peak_hour, platform_comm, per_km_outstation, is_outstation_allowed)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
