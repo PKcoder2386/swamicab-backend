@@ -256,11 +256,18 @@ app.get('/api/drivers/nearby-count', async (req, res) => {
   }
 });
 
-// ==================== MARKET FARE ESTIMATION & OUTSTATION ROUND TRIP FIX ====================
+// ==================== MARKET FARE ESTIMATION & 28% MARKUP ENGINE ====================
 app.post('/api/rides/estimate', async (req, res) => {
-  const { distanceKm, vehicleCategory, isOutstation, tripType } = req.body;
+  const { distanceKm, vehicleCategory, isOutstation, tripType, bookingMode } = req.body;
   try {
-    if (isOutstation && String(vehicleCategory).toLowerCase() === 'auto') {
+    const categoryLower = String(vehicleCategory || 'Mini').toLowerCase();
+
+    // Strict Rule: Bike is allowed ONLY for Parcel mode
+    if (categoryLower === 'bike' && bookingMode !== 'PARCEL') {
+      return res.status(400).json({ success: false, error: 'Bike is exclusively reserved for parcel deliveries.' });
+    }
+
+    if (isOutstation && categoryLower === 'auto') {
       return res.status(400).json({ success: false, error: 'Auto is not allowed for outstation rides.' });
     }
 
@@ -274,18 +281,19 @@ app.post('/api/rides/estimate', async (req, res) => {
     const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || rate.per_km || 18);
     const minFare = parseFloat(rate.min_fare || 80);
 
-    // If Outstation Round trip is selected, double the distance for return journey calculation
     let effectiveDistance = parseFloat(distanceKm || 0);
     if (isOutstation && tripType === 'Round trip') {
-      effectiveDistance = effectiveDistance * 2;
+      effectiveDistance = effectiveDistance * 2; // Double distance for round-trip outstation calculation
     }
 
-    let calculatedFare = baseFare + (effectiveDistance * perKm);
-    if (calculatedFare < minFare) calculatedFare = minFare;
-    calculatedFare = Math.round(calculatedFare);
+    let baseCalculated = baseFare + (effectiveDistance * perKm);
+    if (baseCalculated < minFare) baseCalculated = minFare;
 
-    const platformCut = Math.round(calculatedFare * 0.28 * 100) / 100; 
-    const driverEarnings = Math.round(calculatedFare * 0.72 * 100) / 100; 
+    // Add 28% total amount markup (10% commission + 18% GST)
+    let calculatedFare = Math.round(baseCalculated * 1.28);
+
+    const platformCut = Math.round(calculatedFare * 0.28 * 100) / 100; // 28% admin share
+    const driverEarnings = Math.round(calculatedFare * 0.72 * 100) / 100; // 72% driver share
 
     res.json({
       success: true,
@@ -299,7 +307,6 @@ app.post('/api/rides/estimate', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
 // ==================== DRIVER INCENTIVE TRACKING & RECYCLING ENGINE (12-HR / 10 RIDES) ====================
 async function trackAndAwardIncentive(driverId, clientPool) {
   const now = new Date();
