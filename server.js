@@ -117,11 +117,10 @@ const auth = (req, res, next) => {
 
 const otpStorage = {};
 
-// ==================== FAST2SMS OTP AUTHENTICATION ROUTES ====================
-
+// ==================== FAST2SMS SMART OTP ROUTE ====================
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phoneNumber } = req.body;
-  const phone = normalizePhone(phoneNumber);
+  const phone = normalizePhone(phoneNumber); // Extracts exact 10-digit Indian mobile number
 
   if (!phone || phone.length !== 10) {
     return res.status(400).json({ success: false, error: 'Valid 10-digit mobile number required' });
@@ -134,14 +133,13 @@ app.post('/api/auth/send-otp', async (req, res) => {
   console.log(`🔐 [OTP AUTH] Phone: ${phone} | Code: ${otp}`);
   console.log(`========================================\n`);
 
-  // Send live SMS via Fast2SMS Gateway
+  // Trigger Fast2SMS API Dispatch
   if (process.env.FAST2SMS_API_KEY) {
     try {
-      await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-        route: 'q',
-        message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
-        language: 'english',
-        flash: 0,
+      // 1. Primary Attempt: Send via Fast2SMS Quick / Smart OTP route
+      const response = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
+        route: 'otp',
+        variables_values: otp,
         numbers: phone
       }, {
         headers: {
@@ -149,15 +147,35 @@ app.post('/api/auth/send-otp', async (req, res) => {
           'Content-Type': 'application/json'
         }
       });
-      console.log(`📱 [FAST2SMS] Live OTP successfully dispatched to ${phone}`);
+
+      console.log(`📱 [FAST2SMS Success]:`, response.data);
     } catch (smsErr) {
-      console.error('❌ [FAST2SMS Error]:', smsErr.response?.data || smsErr.message);
+      console.error('⚠️ [Fast2SMS Primary Attempt Failed, trying Fallback Route...]:', smsErr.response?.data || smsErr.message);
+
+      // 2. Fallback Attempt using Quick SMS route
+      try {
+        const fallbackRes = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
+          route: 'q',
+          message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
+          language: 'english',
+          flash: 0,
+          numbers: phone
+        }, {
+          headers: {
+            'authorization': process.env.FAST2SMS_API_KEY,
+            'Content-Type': 'application/json'
+          }
+        });
+        console.log(`📱 [FAST2SMS Fallback Success]:`, fallbackRes.data);
+      } catch (fallbackErr) {
+        console.error('❌ [FAST2SMS Fallback Error]:', fallbackErr.response?.data || fallbackErr.message);
+      }
     }
   }
 
   return res.status(200).json({ 
     success: true, 
-    message: 'OTP sent successfully via Fast2SMS',
+    message: 'OTP processed successfully',
     devOtp: otp 
   });
 });
