@@ -117,7 +117,7 @@ const auth = (req, res, next) => {
 
 const otpStorage = {};
 
-// ==================== NATIVE OTP AUTHENTICATION ROUTES ====================
+// ==================== FAST2SMS OTP AUTHENTICATION ROUTES ====================
 
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phoneNumber } = req.body;
@@ -134,9 +134,30 @@ app.post('/api/auth/send-otp', async (req, res) => {
   console.log(`🔐 [OTP AUTH] Phone: ${phone} | Code: ${otp}`);
   console.log(`========================================\n`);
 
+  // Send live SMS via Fast2SMS Gateway
+  if (process.env.FAST2SMS_API_KEY) {
+    try {
+      await axios.post('https://www.fast2sms.com/dev/bulkV2', {
+        route: 'q',
+        message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
+        language: 'english',
+        flash: 0,
+        numbers: phone
+      }, {
+        headers: {
+          'authorization': process.env.FAST2SMS_API_KEY,
+          'Content-Type': 'application/json'
+        }
+      });
+      console.log(`📱 [FAST2SMS] Live OTP successfully dispatched to ${phone}`);
+    } catch (smsErr) {
+      console.error('❌ [FAST2SMS Error]:', smsErr.response?.data || smsErr.message);
+    }
+  }
+
   return res.status(200).json({ 
     success: true, 
-    message: 'OTP generated successfully',
+    message: 'OTP sent successfully via Fast2SMS',
     devOtp: otp 
   });
 });
@@ -254,7 +275,6 @@ async function trackAndAwardIncentive(driverId, clientPool) {
     const windowEnd = new Date(shift.window_end);
 
     if (now > windowEnd) {
-      // Window expired without hitting 10 rides -> Mark expired and recycle a new 12-hr window
       await clientPool.query(
         `UPDATE driver_incentive_progress SET status = 'Expired' WHERE id = $1`,
         [shift.id]
@@ -271,7 +291,6 @@ async function trackAndAwardIncentive(driverId, clientPool) {
       const updatedRides = shift.rides_completed + 1;
       
       if (updatedRides >= 10) {
-        // Milestone reached! Mark completed and credit ₹200 bonus
         await clientPool.query(
           `UPDATE driver_incentive_progress 
            SET rides_completed = $1, status = 'Completed' 
@@ -319,7 +338,6 @@ app.post('/api/rides/complete-ride', auth, async (req, res) => {
       [totalFare, platformCut, driverEarnings, rideId]
     );
 
-    // Trigger 12-hour shift incentive check & recycling logic
     const incentiveResult = await trackAndAwardIncentive(driverId, pool);
 
     io.emit('ride_completed', { rideId, totalFare, platformCut, driverEarnings, paymentMode, incentiveResult });
