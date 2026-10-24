@@ -262,7 +262,6 @@ app.post('/api/rides/estimate', async (req, res) => {
   try {
     const categoryLower = String(vehicleCategory || 'Mini').toLowerCase();
 
-    // Strict Rule: Bike is allowed ONLY for Parcel mode
     if (categoryLower === 'bike' && bookingMode !== 'PARCEL') {
       return res.status(400).json({ success: false, error: 'Bike is exclusively reserved for parcel deliveries.' });
     }
@@ -283,27 +282,63 @@ app.post('/api/rides/estimate', async (req, res) => {
 
     let effectiveDistance = parseFloat(distanceKm || 0);
     if (isOutstation && tripType === 'Round trip') {
-      effectiveDistance = effectiveDistance * 2; // Double distance for round-trip outstation calculation
+      effectiveDistance = effectiveDistance * 2;
     }
 
+    // 1. Base calculation (Driver's earnings, e.g., 128 km * 15 = 1920)
     let baseCalculated = baseFare + (effectiveDistance * perKm);
     if (baseCalculated < minFare) baseCalculated = minFare;
+    const driverEarnings = Math.round(baseCalculated);
 
-    // Add 28% total amount markup (10% commission + 18% GST)
-    let calculatedFare = Math.round(baseCalculated * 1.28);
+    // 2. Total fare charged to rider with 28% markup added on top (e.g., 1920 * 1.28 = 2458)
+    const estimatedFare = Math.round(driverEarnings * 1.28);
 
-    const platformCut = Math.round(calculatedFare * 0.28 * 100) / 100; // 28% admin share
-    const driverEarnings = Math.round(calculatedFare * 0.72 * 100) / 100; // 72% driver share
+    // 3. Platform cut / commission credited to admin account (e.g., 2458 - 1920 = 538)
+    const platformCut = Math.round((estimatedFare - driverEarnings) * 100) / 100;
 
     res.json({
       success: true,
-      estimatedFare: calculatedFare,
+      estimatedFare,
       platformCut,
       driverEarnings,
       effectiveDistance,
       tollNotice: isOutstation ? "Toll and Parking not included" : null
     });
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/rides/complete-ride', auth, async (req, res) => {
+  const { rideId, totalFare, driverId, paymentMode } = req.body;
+  try {
+    // Ensure driver gets the base amount and admin gets the 28% markup cut
+    const driverEarnings = Math.round((totalFare / 1.28) * 100) / 100; 
+    const platformCut = Math.round((totalFare - driverEarnings) * 100) / 100; 
+
+    if (paymentMode === 'CASH') {
+      await pool.query(
+        `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 AND role = 'driver'`,
+        [platformCut, driverId]
+      );
+    } else {
+      await pool.query(
+        `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
+        [driverEarnings, driverId]
+      );
+    }
+
+    await pool.query(
+      `UPDATE rides SET status = 'Completed', fare = $1, admin_commission = $2, driver_earning = $3 WHERE ride_id = $4`,
+      [totalFare, platformCut, driverEarnings, rideId]
+    );
+
+    const incentiveResult = await trackAndAwardIncentive(driverId, pool);
+
+    io.emit('ride_completed', { rideId, totalFare, platformCut, driverEarnings, paymentMode, incentiveResult });
+    res.json({ success: true, platformCut, driverEarnings, paymentMode, incentiveResult });
+  } catch (err) {
+    console.error('Ride completion error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
