@@ -120,7 +120,7 @@ const otpStorage = {};
 // ==================== FAST2SMS SMART OTP ROUTE ====================
 app.post('/api/auth/send-otp', async (req, res) => {
   const { phoneNumber } = req.body;
-  const phone = normalizePhone(phoneNumber); // Extracts exact 10-digit Indian mobile number
+  const phone = normalizePhone(phoneNumber);
 
   if (!phone || phone.length !== 10) {
     return res.status(400).json({ success: false, error: 'Valid 10-digit mobile number required' });
@@ -133,10 +133,8 @@ app.post('/api/auth/send-otp', async (req, res) => {
   console.log(`🔐 [OTP AUTH] Phone: ${phone} | Code: ${otp}`);
   console.log(`========================================\n`);
 
-  // Trigger Fast2SMS API Dispatch
   if (process.env.FAST2SMS_API_KEY) {
     try {
-      // 1. Primary Attempt: Send via Fast2SMS Quick / Smart OTP route
       const response = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
         route: 'otp',
         variables_values: otp,
@@ -147,12 +145,9 @@ app.post('/api/auth/send-otp', async (req, res) => {
           'Content-Type': 'application/json'
         }
       });
-
       console.log(`📱 [FAST2SMS Success]:`, response.data);
     } catch (smsErr) {
       console.error('⚠️ [Fast2SMS Primary Attempt Failed, trying Fallback Route...]:', smsErr.response?.data || smsErr.message);
-
-      // 2. Fallback Attempt using Quick SMS route
       try {
         const fallbackRes = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
           route: 'q',
@@ -227,6 +222,38 @@ app.post('/api/auth/verify-otp', async (req, res) => {
   }
 
   res.status(400).json({ success: false, error: 'Invalid or expired OTP code' });
+});
+
+// ==================== LIVE NEARBY ONLINE DRIVERS COUNT API ====================
+app.get('/api/drivers/nearby-count', async (req, res) => {
+  const { category } = req.query;
+
+  try {
+    let query = `
+      SELECT COUNT(*) AS total 
+      FROM driver_profiles dp
+      JOIN users u ON dp.user_id = u.id
+      WHERE dp.is_online = true AND u.is_verified = true
+    `;
+    const params = [];
+
+    if (category) {
+      params.push(category.toLowerCase());
+      query += ` AND LOWER(dp.vehicle_category) = $${params.length}`;
+    }
+
+    const result = await pool.query(query, params);
+    const activeCount = parseInt(result.rows[0].total, 10) || 0;
+
+    res.json({
+      success: true,
+      activeDrivers: activeCount,
+      category: category || 'ALL'
+    });
+  } catch (err) {
+    console.error('Fetch active drivers count error:', err.message);
+    res.json({ success: true, activeDrivers: 0 });
+  }
 });
 
 // ==================== MARKET FARE ESTIMATION & 28% SPLIT ENGINE ====================
