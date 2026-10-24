@@ -256,10 +256,9 @@ app.get('/api/drivers/nearby-count', async (req, res) => {
   }
 });
 
-// ==================== MARKET FARE ESTIMATION & 28% SPLIT ENGINE ====================
-
+// ==================== MARKET FARE ESTIMATION & OUTSTATION ROUND TRIP FIX ====================
 app.post('/api/rides/estimate', async (req, res) => {
-  const { distanceKm, vehicleCategory, isOutstation } = req.body;
+  const { distanceKm, vehicleCategory, isOutstation, tripType } = req.body;
   try {
     if (isOutstation && String(vehicleCategory).toLowerCase() === 'auto') {
       return res.status(400).json({ success: false, error: 'Auto is not allowed for outstation rides.' });
@@ -275,7 +274,13 @@ app.post('/api/rides/estimate', async (req, res) => {
     const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || rate.per_km || 18);
     const minFare = parseFloat(rate.min_fare || 80);
 
-    let calculatedFare = baseFare + (distanceKm * perKm);
+    // If Outstation Round trip is selected, double the distance for return journey calculation
+    let effectiveDistance = parseFloat(distanceKm || 0);
+    if (isOutstation && tripType === 'Round trip') {
+      effectiveDistance = effectiveDistance * 2;
+    }
+
+    let calculatedFare = baseFare + (effectiveDistance * perKm);
     if (calculatedFare < minFare) calculatedFare = minFare;
     calculatedFare = Math.round(calculatedFare);
 
@@ -287,6 +292,7 @@ app.post('/api/rides/estimate', async (req, res) => {
       estimatedFare: calculatedFare,
       platformCut,
       driverEarnings,
+      effectiveDistance,
       tollNotice: isOutstation ? "Toll and Parking not included" : null
     });
   } catch (err) {
