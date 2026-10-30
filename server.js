@@ -285,15 +285,10 @@ app.post('/api/rides/estimate', async (req, res) => {
       effectiveDistance = effectiveDistance * 2;
     }
 
-    // 1. Base calculation (Driver's earnings)
     let baseCalculated = baseFare + (effectiveDistance * perKm);
     if (baseCalculated < minFare) baseCalculated = minFare;
     const driverEarnings = Math.round(baseCalculated);
-
-    // 2. Total fare charged to rider with 28% markup added on top
     const estimatedFare = Math.round(driverEarnings * 1.28);
-
-    // 3. Platform cut / commission credited to admin account
     const platformCut = Math.round((estimatedFare - driverEarnings) * 100) / 100;
 
     res.json({
@@ -309,22 +304,57 @@ app.post('/api/rides/estimate', async (req, res) => {
   }
 });
 
+// ==================== REAL-TIME RIDE BOOKING & OTP GENERATION ====================
+app.post('/api/rides/book', auth, async (req, res) => {
+  const { riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, paymentMode } = req.body;
+  try {
+    const rideOtp = Math.floor(1000 + Math.random() * 9000).toString();
+    const driverEarnings = Math.round((totalFare / 1.28) * 100) / 100;
+    const adminCommission = Math.round((totalFare - driverEarnings) * 100) / 100;
+
+    const rideRes = await pool.query(
+      `INSERT INTO rides (rider_id, vehicle_category, pickup, destination, pickup_lat, pickup_lng, dest_lat, dest_lng, fare, driver_earning, admin_commission, payment_method, otp, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'Searching') RETURNING *`,
+      [riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, driverEarnings, adminCommission, paymentMode, rideOtp]
+    );
+
+    const newRide = rideRes.rows[0];
+
+    io.emit('new_ride_request', {
+      rideId: newRide.ride_id,
+      vehicleCategory,
+      pickupAddress,
+      destinationAddress,
+      pickupLat,
+      pickupLng,
+      totalFare
+    });
+
+    res.json({
+      success: true,
+      rideId: newRide.ride_id,
+      otp: rideOtp,
+      message: 'Ride booked successfully, searching for nearby drivers...'
+    });
+  } catch (err) {
+    console.error('Ride booking error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==================== ACCURATE 28% MARKUP RIDE COMPLETION ENGINE ====================
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
   const { rideId, totalFare, driverId, paymentMode } = req.body;
   try {
-    // Mathematical markup split: Driver gets base fare, Admin gets 28% markup cut
     const driverEarnings = Math.round((totalFare / 1.28) * 100) / 100; 
     const platformCut = Math.round((totalFare - driverEarnings) * 100) / 100; 
 
     if (paymentMode === 'CASH') {
-      // Driver collected full cash (Base + 28%), deduct admin 28% commission from driver wallet
       await pool.query(
         `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 AND role = 'driver'`,
         [platformCut, driverId]
       );
     } else {
-      // Online UPI payment: Driver receives net base fare credited to their wallet/account
       await pool.query(
         `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
         [driverEarnings, driverId]
