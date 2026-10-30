@@ -285,15 +285,15 @@ app.post('/api/rides/estimate', async (req, res) => {
       effectiveDistance = effectiveDistance * 2;
     }
 
-    // 1. Base calculation (Driver's earnings, e.g., 128 km * 15 = 1920)
+    // 1. Base calculation (Driver's earnings)
     let baseCalculated = baseFare + (effectiveDistance * perKm);
     if (baseCalculated < minFare) baseCalculated = minFare;
     const driverEarnings = Math.round(baseCalculated);
 
-    // 2. Total fare charged to rider with 28% markup added on top (e.g., 1920 * 1.28 = 2458)
+    // 2. Total fare charged to rider with 28% markup added on top
     const estimatedFare = Math.round(driverEarnings * 1.28);
 
-    // 3. Platform cut / commission credited to admin account (e.g., 2458 - 1920 = 538)
+    // 3. Platform cut / commission credited to admin account
     const platformCut = Math.round((estimatedFare - driverEarnings) * 100) / 100;
 
     res.json({
@@ -309,19 +309,22 @@ app.post('/api/rides/estimate', async (req, res) => {
   }
 });
 
+// ==================== ACCURATE 28% MARKUP RIDE COMPLETION ENGINE ====================
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
   const { rideId, totalFare, driverId, paymentMode } = req.body;
   try {
-    // Ensure driver gets the base amount and admin gets the 28% markup cut
+    // Mathematical markup split: Driver gets base fare, Admin gets 28% markup cut
     const driverEarnings = Math.round((totalFare / 1.28) * 100) / 100; 
     const platformCut = Math.round((totalFare - driverEarnings) * 100) / 100; 
 
     if (paymentMode === 'CASH') {
+      // Driver collected full cash (Base + 28%), deduct admin 28% commission from driver wallet
       await pool.query(
         `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 AND role = 'driver'`,
         [platformCut, driverId]
       );
     } else {
+      // Online UPI payment: Driver receives net base fare credited to their wallet/account
       await pool.query(
         `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
         [driverEarnings, driverId]
@@ -342,6 +345,7 @@ app.post('/api/rides/complete-ride', auth, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 // ==================== DRIVER INCENTIVE TRACKING & RECYCLING ENGINE (12-HR / 10 RIDES) ====================
 async function trackAndAwardIncentive(driverId, clientPool) {
   const now = new Date();
@@ -407,39 +411,6 @@ async function trackAndAwardIncentive(driverId, clientPool) {
   }
   return { incentiveUnlocked: false, currentRides: shift.rides_completed };
 }
-
-app.post('/api/rides/complete-ride', auth, async (req, res) => {
-  const { rideId, totalFare, driverId, paymentMode } = req.body;
-  try {
-    const platformCut = Math.round(totalFare * 0.28 * 100) / 100; 
-    const driverEarnings = Math.round(totalFare * 0.72 * 100) / 100; 
-
-    if (paymentMode === 'CASH') {
-      await pool.query(
-        `UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2 AND role = 'driver'`,
-        [platformCut, driverId]
-      );
-    } else {
-      await pool.query(
-        `UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2 AND role = 'driver'`,
-        [driverEarnings, driverId]
-      );
-    }
-
-    await pool.query(
-      `UPDATE rides SET status = 'Completed', fare = $1, admin_commission = $2, driver_earning = $3 WHERE ride_id = $4`,
-      [totalFare, platformCut, driverEarnings, rideId]
-    );
-
-    const incentiveResult = await trackAndAwardIncentive(driverId, pool);
-
-    io.emit('ride_completed', { rideId, totalFare, platformCut, driverEarnings, paymentMode, incentiveResult });
-    res.json({ success: true, platformCut, driverEarnings, paymentMode, incentiveResult });
-  } catch (err) {
-    console.error('Ride completion error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 app.post('/api/rides/cancel', auth, async (req, res) => {
   const { rideId, cancelledBy, userId } = req.body;
