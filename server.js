@@ -61,9 +61,9 @@ async function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS rate_cards (
         id SERIAL PRIMARY KEY,
         category VARCHAR(50) UNIQUE,
-        base_fare NUMERIC(10,2) DEFAULT 50.00,
-        per_km NUMERIC(10,2) DEFAULT 18.00,
-        per_km_local NUMERIC(10,2) DEFAULT 18.00,
+        base_fare NUMERIC(10,2) DEFAULT 80.00,
+        per_km NUMERIC(10,2) DEFAULT 20.00,
+        per_km_local NUMERIC(10,2) DEFAULT 20.00,
         per_km_outstation NUMERIC(10,2) DEFAULT 15.00,
         per_min NUMERIC(10,2) DEFAULT 2.00,
         min_fare NUMERIC(10,2) DEFAULT 80.00,
@@ -86,7 +86,7 @@ async function initializeDatabase() {
       );
     `);
 
-    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 18.00;`);
+    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 20.00;`);
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_outstation NUMERIC(10,2) DEFAULT 15.00;`);
     await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS is_outstation_allowed BOOLEAN DEFAULT TRUE;`);
     await pool.query(`ALTER TABLE rate_cards DROP CONSTRAINT IF EXISTS rate_cards_category_key;`);
@@ -276,9 +276,9 @@ app.post('/api/rides/estimate', async (req, res) => {
       [vehicleCategory || 'Mini']
     );
 
-    const rate = rateRes.rows[0] || { base_fare: 50, per_km_local: 18, per_km_outstation: 15, min_fare: 80 };
-    const baseFare = parseFloat(rate.base_fare || 50);
-    const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || rate.per_km || 18);
+    const rate = rateRes.rows[0] || { base_fare: 80, per_km_local: 20, per_km_outstation: 15, min_fare: 80 };
+    const baseFare = parseFloat(rate.base_fare || 80);
+    const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || rate.per_km || 20);
     const minFare = parseFloat(rate.min_fare || 80);
 
     let effectiveDistance = parseFloat(distanceKm || 0);
@@ -286,10 +286,13 @@ app.post('/api/rides/estimate', async (req, res) => {
       effectiveDistance = effectiveDistance * 2;
     }
 
-    let baseCalculated = baseFare + (effectiveDistance * perKm);
-    if (baseCalculated < minFare) baseCalculated = minFare;
-    const driverEarnings = Math.round(baseCalculated);
-    const estimatedFare = Math.round(driverEarnings * 1.28);
+    // Exact formula: Base Fare + (Distance * Per Km)
+    let driverEarnings = baseFare + (effectiveDistance * perKm);
+    if (driverEarnings < minFare) driverEarnings = minFare;
+    driverEarnings = Math.round(driverEarnings * 100) / 100;
+
+    // Apply +28% Commission / GST markup
+    const estimatedFare = Math.round((driverEarnings * 1.28) * 10) / 10;
     const platformCut = Math.round((estimatedFare - driverEarnings) * 100) / 100;
 
     res.json({
@@ -324,7 +327,6 @@ app.post('/api/rides/book', auth, async (req, res) => {
     let driverRes = await pool.query(driverQuery, [vehicleCategory || 'Mini']);
 
     if (driverRes.rows.length === 0) {
-      // Fallback: fetch any online verified driver if category-specific match isn't currently online
       driverQuery = `
         SELECT u.id as driver_id, u.full_name, u.phone_number, dp.vehicle_number, dp.vehicle_model, dp.vehicle_category
         FROM driver_profiles dp
@@ -348,6 +350,12 @@ app.post('/api/rides/book', auth, async (req, res) => {
 
     const newRide = rideRes.rows[0];
 
+    // Determine what amount the driver sees based on payment mode:
+    // - CASH: Driver sees full totalFare (collects cash directly from rider)
+    // - ONLINE (UPI/Card): Driver sees net driverEarnings (platform handles payment collection)
+    const isCashPayment = (paymentMode && paymentMode.toUpperCase() === 'CASH');
+    const displayFareForDriver = isCashPayment ? totalFare : driverEarnings;
+
     io.emit('new_ride_request', {
       rideId: newRide.ride_id,
       driverId,
@@ -356,13 +364,20 @@ app.post('/api/rides/book', auth, async (req, res) => {
       destinationAddress,
       pickupLat,
       pickupLng,
-      totalFare
+      totalFare,
+      driverEarnings,
+      displayFare: displayFareForDriver,
+      paymentMode
     });
 
     res.json({
       success: true,
       rideId: newRide.ride_id,
       otp: rideOtp,
+      fare: totalFare,
+      driverEarnings,
+      displayFare: displayFareForDriver,
+      paymentMode,
       driver: assignedDriver ? {
         name: assignedDriver.full_name,
         phone: assignedDriver.phone_number,
@@ -670,8 +685,8 @@ app.get('/api/admin/rate-cards', async (req, res) => {
     const formattedRows = rows.map(card => ({
       id: card.id,
       category: card.category,
-      baseFare: parseFloat(card.base_fare || 50),
-      perKm: parseFloat(card.per_km_local || card.per_km || 18),
+      baseFare: parseFloat(card.base_fare || 80),
+      perKm: parseFloat(card.per_km_local || card.per_km || 20),
       perMin: parseFloat(card.per_min || 2),
       minFare: parseFloat(card.min_fare || 80),
       nightSurge: card.night_surge || false,
@@ -714,9 +729,9 @@ app.put('/api/admin/rate-cards', async (req, res) => {
           WHERE id = $12
         `, [
           card.category,
-          parseFloat(card.baseFare || 0),
-          parseFloat(card.perKmLocal || card.perKm || 18),
-          parseFloat(card.perKmLocal || card.perKm || 18),
+          parseFloat(card.baseFare || 80),
+          parseFloat(card.perKmLocal || card.perKm || 20),
+          parseFloat(card.perKmLocal || card.perKm || 20),
           parseFloat(card.perMin || 2),
           parseFloat(card.minFare || 80),
           Boolean(card.nightSurge),
@@ -743,9 +758,9 @@ app.put('/api/admin/rate-cards', async (req, res) => {
             is_outstation_allowed = EXCLUDED.is_outstation_allowed
         `, [
           card.category,
-          parseFloat(card.baseFare || 0),
-          parseFloat(card.perKmLocal || card.perKm || 18),
-          parseFloat(card.perKmLocal || card.perKm || 18),
+          parseFloat(card.baseFare || 80),
+          parseFloat(card.perKmLocal || card.perKm || 20),
+          parseFloat(card.perKmLocal || card.perKm || 20),
           parseFloat(card.perMin || 2),
           parseFloat(card.minFare || 80),
           Boolean(card.nightSurge),
