@@ -300,15 +300,20 @@ app.post('/api/rides/estimate', async (req, res) => {
       effectiveDistance = 111.2; // Fallback distance if request body distance is missing
     }
 
+    let rawDistanceForCalc = effectiveDistance;
     if (isOutstation && tripType === 'Round trip') {
-      effectiveDistance = effectiveDistance * 2;
+      rawDistanceForCalc = effectiveDistance * 2;
     }
 
-    let driverEarnings = baseFare + (effectiveDistance * activePerKm);
+    let driverEarnings = baseFare + (rawDistanceForCalc * activePerKm);
     if (driverEarnings < minFare) driverEarnings = minFare;
     driverEarnings = Math.round(driverEarnings * 100) / 100;
 
-    const estimatedFare = Math.round((driverEarnings * 1.28) * 10) / 10;
+    let estimatedFare = Math.round(driverEarnings * 1.28);
+    if (isOutstation && tripType === 'Round trip') {
+      estimatedFare = Math.round(estimatedFare * 1.8);
+    }
+
     const platformCut = Math.round((estimatedFare - driverEarnings) * 100) / 100;
 
     res.json({
