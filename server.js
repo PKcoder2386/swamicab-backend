@@ -296,6 +296,10 @@ app.post('/api/rides/estimate', async (req, res) => {
     const activePerKm = isOutstation ? perKmOutstation : perKmLocal;
 
     let effectiveDistance = parseFloat(distanceKm || 0);
+    if (effectiveDistance <= 0) {
+      effectiveDistance = 111.2; // Fallback distance if request body distance is missing
+    }
+
     if (isOutstation && tripType === 'Round trip') {
       effectiveDistance = effectiveDistance * 2;
     }
@@ -310,7 +314,7 @@ app.post('/api/rides/estimate', async (req, res) => {
     res.json({
       success: true,
       estimatedFare,
-      perKmRate: isOutstation && tripType === 'Round trip' ? activePerKm : undefined,
+      perKmRate: activePerKm,
       platformCut,
       driverEarnings,
       effectiveDistance,
