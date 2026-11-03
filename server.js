@@ -49,6 +49,17 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
+// Multer storage setup for file/document uploads (Preserved from original code)
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  }
+});
+const upload = multer({ storage: storage });
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
@@ -257,7 +268,7 @@ app.get('/api/drivers/nearby-count', async (req, res) => {
   }
 });
 
-// ==================== MARKET FARE ESTIMATION & 28% MARKUP ENGINE ====================
+// ==================== MARKET FARE ESTIMATION & OUTSTATION RATE ENGINE ====================
 app.post('/api/rides/estimate', async (req, res) => {
   const { distanceKm, vehicleCategory, isOutstation, tripType, bookingMode } = req.body;
   try {
@@ -278,26 +289,28 @@ app.post('/api/rides/estimate', async (req, res) => {
 
     const rate = rateRes.rows[0] || { base_fare: 80, per_km_local: 20, per_km_outstation: 15, min_fare: 80 };
     const baseFare = parseFloat(rate.base_fare || 80);
-    const perKm = isOutstation ? parseFloat(rate.per_km_outstation || 15) : parseFloat(rate.per_km_local || rate.per_km || 20);
+    const perKmLocal = parseFloat(rate.per_km_local || rate.per_km || 20);
+    const perKmOutstation = parseFloat(rate.per_km_outstation || 15);
     const minFare = parseFloat(rate.min_fare || 80);
+
+    const activePerKm = isOutstation ? perKmOutstation : perKmLocal;
 
     let effectiveDistance = parseFloat(distanceKm || 0);
     if (isOutstation && tripType === 'Round trip') {
       effectiveDistance = effectiveDistance * 2;
     }
 
-    // Exact formula: Base Fare + (Distance * Per Km)
-    let driverEarnings = baseFare + (effectiveDistance * perKm);
+    let driverEarnings = baseFare + (effectiveDistance * activePerKm);
     if (driverEarnings < minFare) driverEarnings = minFare;
     driverEarnings = Math.round(driverEarnings * 100) / 100;
 
-    // Apply +28% Commission / GST markup
     const estimatedFare = Math.round((driverEarnings * 1.28) * 10) / 10;
     const platformCut = Math.round((estimatedFare - driverEarnings) * 100) / 100;
 
     res.json({
       success: true,
       estimatedFare,
+      perKmRate: isOutstation && tripType === 'Round trip' ? activePerKm : undefined,
       platformCut,
       driverEarnings,
       effectiveDistance,
@@ -316,7 +329,6 @@ app.post('/api/rides/book', auth, async (req, res) => {
     const driverEarnings = Math.round((totalFare / 1.28) * 100) / 100;
     const adminCommission = Math.round((totalFare - driverEarnings) * 100) / 100;
 
-    // 1. Fetch real online driver from database matching vehicle category
     let driverQuery = `
       SELECT u.id as driver_id, u.full_name, u.phone_number, dp.vehicle_number, dp.vehicle_model, dp.vehicle_category
       FROM driver_profiles dp
@@ -338,10 +350,17 @@ app.post('/api/rides/book', auth, async (req, res) => {
     }
 
     const assignedDriver = driverRes.rows[0] || null;
-    const driverId = assignedDriver ? assignedDriver.driver_id : null;
-    const rideStatus = assignedDriver ? 'Accepted' : 'Searching';
 
-    // 2. Insert ride record into database with real driver ID and status
+    if (!assignedDriver) {
+      return res.status(404).json({
+        success: false,
+        error: 'No active drivers found nearby right now. Please try again shortly.'
+      });
+    }
+
+    const driverId = assignedDriver.driver_id;
+    const rideStatus = 'Accepted';
+
     const rideRes = await pool.query(
       `INSERT INTO rides (rider_id, driver_id, vehicle_category, pickup, destination, pickup_lat, pickup_lng, dest_lat, dest_lng, fare, driver_earning, admin_commission, payment_method, otp, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
@@ -349,10 +368,6 @@ app.post('/api/rides/book', auth, async (req, res) => {
     );
 
     const newRide = rideRes.rows[0];
-
-    // Determine what amount the driver sees based on payment mode:
-    // - CASH: Driver sees full totalFare (collects cash directly from rider)
-    // - ONLINE (UPI/Card): Driver sees net driverEarnings (platform handles payment collection)
     const isCashPayment = (paymentMode && paymentMode.toUpperCase() === 'CASH');
     const displayFareForDriver = isCashPayment ? totalFare : driverEarnings;
 
@@ -378,18 +393,13 @@ app.post('/api/rides/book', auth, async (req, res) => {
       driverEarnings,
       displayFare: displayFareForDriver,
       paymentMode,
-      driver: assignedDriver ? {
+      driver: {
         name: assignedDriver.full_name,
         phone: assignedDriver.phone_number,
-        vehicleNumber: assignedDriver.vehicle_number || 'MH 12 AB 4587',
+        vehicleNumber: assignedDriver.vehicle_number,
         vehicleModel: assignedDriver.vehicle_model || `${vehicleCategory} (Standard)`
-      } : {
-        name: 'Rohit Kumar',
-        phone: '9876543210',
-        vehicleNumber: 'MH 12 AB 4587',
-        vehicleModel: 'Maruti Swift (White)'
       },
-      message: assignedDriver ? 'Real driver assigned successfully!' : 'Searching for nearby drivers...'
+      message: 'Real driver assigned successfully!'
     });
   } catch (err) {
     console.error('Ride booking error:', err);
@@ -397,7 +407,7 @@ app.post('/api/rides/book', auth, async (req, res) => {
   }
 });
 
-// ==================== ACCURATE 28% MARKUP RIDE COMPLETION ENGINE ====================
+// ==================== ACCURATE RIDE COMPLETION ENGINE ====================
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
   const { rideId, totalFare, driverId, paymentMode } = req.body;
   try {
@@ -431,17 +441,14 @@ app.post('/api/rides/complete-ride', auth, async (req, res) => {
   }
 });
 
-// ==================== DRIVER INCENTIVE TRACKING & RECYCLING ENGINE (12-HR / 10 RIDES) ====================
 async function trackAndAwardIncentive(driverId, clientPool) {
   const now = new Date();
-
   let shiftRes = await clientPool.query(
     `SELECT * FROM driver_incentive_progress 
      WHERE driver_id = $1 AND status = 'Active' 
      ORDER BY id DESC LIMIT 1`,
     [driverId]
   );
-
   let shift;
 
   if (shiftRes.rows.length === 0) {
@@ -457,11 +464,7 @@ async function trackAndAwardIncentive(driverId, clientPool) {
     const windowEnd = new Date(shift.window_end);
 
     if (now > windowEnd) {
-      await clientPool.query(
-        `UPDATE driver_incentive_progress SET status = 'Expired' WHERE id = $1`,
-        [shift.id]
-      );
-
+      await clientPool.query(`UPDATE driver_incentive_progress SET status = 'Expired' WHERE id = $1`, [shift.id]);
       const freshShiftRes = await clientPool.query(
         `INSERT INTO driver_incentive_progress (driver_id, window_start, window_end, rides_completed, status)
          VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '12 hours', 1, 'Active')
@@ -471,26 +474,12 @@ async function trackAndAwardIncentive(driverId, clientPool) {
       shift = freshShiftRes.rows[0];
     } else {
       const updatedRides = shift.rides_completed + 1;
-      
       if (updatedRides >= 10) {
-        await clientPool.query(
-          `UPDATE driver_incentive_progress 
-           SET rides_completed = $1, status = 'Completed' 
-           WHERE id = $2`,
-          [updatedRides, shift.id]
-        );
-
-        await clientPool.query(
-          `UPDATE users SET wallet_balance = wallet_balance + 200 WHERE id = $1 AND role = 'driver'`,
-          [driverId]
-        );
-
+        await clientPool.query(`UPDATE driver_incentive_progress SET rides_completed = $1, status = 'Completed' WHERE id = $2`, [updatedRides, shift.id]);
+        await clientPool.query(`UPDATE users SET wallet_balance = wallet_balance + 200 WHERE id = $1 AND role = 'driver'`, [driverId]);
         return { incentiveUnlocked: true, reward: 200, currentRides: updatedRides };
       } else {
-        await clientPool.query(
-          `UPDATE driver_incentive_progress SET rides_completed = $1 WHERE id = $2`,
-          [updatedRides, shift.id]
-        );
+        await clientPool.query(`UPDATE driver_incentive_progress SET rides_completed = $1 WHERE id = $2`, [updatedRides, shift.id]);
       }
     }
   }
@@ -687,12 +676,13 @@ app.get('/api/admin/rate-cards', async (req, res) => {
       category: card.category,
       baseFare: parseFloat(card.base_fare || 80),
       perKm: parseFloat(card.per_km_local || card.per_km || 20),
+      perKmLocal: parseFloat(card.per_km_local || 20),
+      perKmOutstation: parseFloat(card.per_km_outstation || 15),
       perMin: parseFloat(card.per_min || 2),
       minFare: parseFloat(card.min_fare || 80),
       nightSurge: card.night_surge || false,
       peakHour: card.peak_hour || false,
       platformComm: parseFloat(card.platform_comm || 10),
-      perKmOutstation: parseFloat(card.per_km_outstation || 15),
       isOutstationAllowed: card.is_outstation_allowed ?? (card.category.toLowerCase() !== 'auto')
     }));
     res.json(formattedRows);
