@@ -400,7 +400,7 @@ app.post('/api/rides/estimate', async (req, res) => {
       [vehicleCategory || 'Mini']
     );
 
-    const rate = rateRes.rows[0] || { base_fare: 80, per_km_local: 20, per_km_outstation: 15, min_fare: 80 };
+    const rate = rateRes.rows[0] || { base_fare: 80, per_km_local: 20, per_km_outstation: 15, min_fare: 80, night_surge: true, platform_comm: 10 };
     const baseFare = parseFloat(rate.base_fare || 80);
     const perKmLocal = parseFloat(rate.per_km_local || rate.per_km || 20);
     const perKmOutstation = parseFloat(rate.per_km_outstation || 15);
@@ -410,32 +410,42 @@ app.post('/api/rides/estimate', async (req, res) => {
 
     let effectiveDistance = parseFloat(distanceKm || 0);
     if (effectiveDistance <= 0) {
-      effectiveDistance = 111.2; // Fallback distance if request body distance is missing
+      effectiveDistance = 148.0; // Default fallback distance to Shirdi from Pune
     }
 
     let rawDistanceForCalc = effectiveDistance;
     if (isOutstation && tripType === 'Round trip') {
-      rawDistanceForCalc = effectiveDistance * 2;
+      rawDistanceForCalc = effectiveDistance * 2; // Round trip multiplies distance by 2
     }
 
-    let driverEarnings = baseFare + (rawDistanceForCalc * activePerKm);
-    if (driverEarnings < minFare) driverEarnings = minFare;
-    driverEarnings = Math.round(driverEarnings * 100) / 100;
-
-    let estimatedFare = Math.round(driverEarnings * 1.28);
-    if (isOutstation && tripType === 'Round trip') {
-      estimatedFare = Math.round(estimatedFare * 1.8);
+    // Calculation: Base Fare + (Distance * Rate)
+    let calculatedFare = baseFare + (rawDistanceForCalc * activePerKm);
+    
+    // Add night time allowance if applicable
+    let nightAllowance = 0;
+    if (rate.night_surge) {
+      nightAllowance = 138; 
+      calculatedFare += nightAllowance;
     }
 
-    const platformCut = Math.round((estimatedFare - driverEarnings) * 100) / 100;
+    let driverAllowance = isOutstation ? 332 : 0;
+    calculatedFare += driverAllowance;
+
+    if (calculatedFare < minFare) calculatedFare = minFare;
+    calculatedFare = Math.round(calculatedFare * 100) / 100;
+
+    const platformCut = Math.round((calculatedFare * (parseFloat(rate.platform_comm || 10) / 100)) * 100) / 100;
+    const driverEarnings = Math.round((calculatedFare - platformCut) * 100) / 100;
 
     res.json({
       success: true,
-      estimatedFare,
+      estimatedFare: Math.round(calculatedFare),
       perKmRate: activePerKm,
       platformCut,
       driverEarnings,
       effectiveDistance,
+      nightAllowance,
+      driverAllowance,
       tollNotice: isOutstation ? "Toll and Parking not included" : null
     });
   } catch (err) {
@@ -448,7 +458,7 @@ app.post('/api/rides/book', auth, async (req, res) => {
   const { riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, paymentMode } = req.body;
   try {
     const rideOtp = Math.floor(1000 + Math.random() * 9000).toString();
-    const driverEarnings = Math.round((totalFare / 1.28) * 100) / 100;
+    const driverEarnings = Math.round((totalFare * 0.72) * 100) / 100; // 28% Platform commission split
     const adminCommission = Math.round((totalFare - driverEarnings) * 100) / 100;
 
     let driverQuery = `
@@ -533,7 +543,7 @@ app.post('/api/rides/book', auth, async (req, res) => {
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
   const { rideId, totalFare, driverId, paymentMode } = req.body;
   try {
-    const driverEarnings = Math.round((totalFare / 1.28) * 100) / 100; 
+    const driverEarnings = Math.round((totalFare * 0.72) * 100) / 100; 
     const platformCut = Math.round((totalFare - driverEarnings) * 100) / 100; 
 
     if (paymentMode === 'CASH') {
