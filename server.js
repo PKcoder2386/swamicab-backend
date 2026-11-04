@@ -686,8 +686,12 @@ app.put('/api/admin/settings', async (req, res) => {
 });
 
 app.get('/api/admin/rate-cards', async (req, res) => {
+  let client;
   try {
-    const { rows } = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
+    client = await pool.connect();
+    const { rows } = await client.query("SELECT * FROM rate_cards ORDER BY id ASC");
+    client.release();
+
     const formattedRows = rows.map(card => ({
       id: card.id,
       category: card.category,
@@ -704,8 +708,29 @@ app.get('/api/admin/rate-cards', async (req, res) => {
     }));
     res.json(formattedRows);
   } catch (err) {
-    console.error('Fetch rate cards error:', err);
-    res.json([]);
+    if (client) client.release(true);
+    console.error('⚠️ Fetch rate cards error (Auto-recovered):', err.message);
+    try {
+      const fallbackRows = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
+      const formattedRows = fallbackRows.rows.map(card => ({
+        id: card.id,
+        category: card.category,
+        baseFare: parseFloat(card.base_fare || 80),
+        perKm: parseFloat(card.per_km_local || card.per_km || 20),
+        perKmLocal: parseFloat(card.per_km_local || 20),
+        perKmOutstation: parseFloat(card.per_km_outstation || 15),
+        perMin: parseFloat(card.per_min || 2),
+        minFare: parseFloat(card.min_fare || 80),
+        nightSurge: card.night_surge || false,
+        peakHour: card.peak_hour || false,
+        platformComm: parseFloat(card.platform_comm || 10),
+        isOutstationAllowed: card.is_outstation_allowed ?? (card.category.toLowerCase() !== 'auto')
+      }));
+      return res.json(formattedRows);
+    } catch (fallbackErr) {
+      console.error('❌ Rate cards fallback failed:', fallbackErr.message);
+      res.json([]);
+    }
   }
 });
 
