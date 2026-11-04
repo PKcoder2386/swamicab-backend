@@ -75,8 +75,11 @@ pool.on('error', (err, client) => {
 
 // ==================== AUTO-MIGRATE DATABASE TABLES ON STARTUP ====================
 async function initializeDatabase() {
+  let client;
   try {
-    await pool.query(`
+    client = await pool.connect();
+    
+    await client.query(`
       CREATE TABLE IF NOT EXISTS rate_cards (
         id SERIAL PRIMARY KEY,
         category VARCHAR(50) UNIQUE,
@@ -93,7 +96,7 @@ async function initializeDatabase() {
       );
     `);
 
-    await pool.query(`
+    await client.query(`
       CREATE TABLE IF NOT EXISTS driver_incentive_progress (
           id SERIAL PRIMARY KEY,
           driver_id INT REFERENCES users(id) ON DELETE CASCADE,
@@ -105,15 +108,17 @@ async function initializeDatabase() {
       );
     `);
 
-    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 20.00;`);
-    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_outstation NUMERIC(10,2) DEFAULT 15.00;`);
-    await pool.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS is_outstation_allowed BOOLEAN DEFAULT TRUE;`);
-    await pool.query(`ALTER TABLE rate_cards DROP CONSTRAINT IF EXISTS rate_cards_category_key;`);
-    await pool.query(`ALTER TABLE rate_cards ADD CONSTRAINT rate_cards_category_key UNIQUE (category);`);
-    await pool.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id);`);
+    await client.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 20.00;`);
+    await client.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_outstation NUMERIC(10,2) DEFAULT 15.00;`);
+    await client.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS is_outstation_allowed BOOLEAN DEFAULT TRUE;`);
+    await client.query(`ALTER TABLE rate_cards DROP CONSTRAINT IF EXISTS rate_cards_category_key;`);
+    await client.query(`ALTER TABLE rate_cards ADD CONSTRAINT rate_cards_category_key UNIQUE (category);`);
+    await client.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id);`);
 
+    client.release();
     console.log('✅ Database schemas, driver tracking, and ride columns auto-verified and migrated successfully.');
   } catch (err) {
+    if (client) client.release(true);
     console.error('⚠️ Database Auto-Migration Notice:', err.message);
   }
 }
