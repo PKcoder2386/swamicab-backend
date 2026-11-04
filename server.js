@@ -112,6 +112,17 @@ async function initializeDatabase() {
       );
     `);
 
+    // Auto-seed default rate cards if empty
+    await client.query(`
+      INSERT INTO rate_cards (category, base_fare, per_km_local, per_km_outstation, per_min, min_fare, night_surge, peak_hour, platform_comm, is_outstation_allowed)
+      VALUES 
+      ('Mini', 80.00, 20.00, 15.00, 2.00, 80.00, true, true, 10.00, true),
+      ('Sedan', 120.00, 25.00, 18.00, 2.50, 120.00, true, true, 10.00, true),
+      ('Prime', 150.00, 30.00, 22.00, 3.00, 150.00, true, true, 10.00, true),
+      ('SUV', 200.00, 35.00, 25.00, 3.50, 200.00, true, true, 10.00, true)
+      ON CONFLICT (category) DO NOTHING;
+    `);
+
     // 3. Create rides table
     await client.query(`
       CREATE TABLE IF NOT EXISTS rides (
