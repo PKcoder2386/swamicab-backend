@@ -62,7 +62,7 @@ const upload = multer({ storage: storage });
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  ssl: { rejectUnauthorized: false }, // Required for secure cloud connection to Neon/AWS
   max: 20,                       // Max number of clients in the pool
   idleTimeoutMillis: 30000,      // Close idle clients after 30 seconds
   connectionTimeoutMillis: 5000  // Return an error after 5 seconds if connection could not be established
@@ -79,6 +79,22 @@ async function initializeDatabase() {
   try {
     client = await pool.connect();
     
+    // 1. Create base users table first so foreign keys can reference it
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        phone_number VARCHAR(20) UNIQUE,
+        email VARCHAR(100) UNIQUE,
+        full_name VARCHAR(100),
+        role VARCHAR(20) DEFAULT 'rider',
+        otp_hash VARCHAR(255),
+        wallet_balance NUMERIC(10,2) DEFAULT 0.00,
+        is_verified BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 2. Create rate cards table
     await client.query(`
       CREATE TABLE IF NOT EXISTS rate_cards (
         id SERIAL PRIMARY KEY,
@@ -96,6 +112,30 @@ async function initializeDatabase() {
       );
     `);
 
+    // 3. Create rides table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS rides (
+        ride_id SERIAL PRIMARY KEY,
+        rider_id INT REFERENCES users(id),
+        driver_id INT REFERENCES users(id),
+        vehicle_category VARCHAR(50),
+        pickup TEXT,
+        destination TEXT,
+        pickup_lat NUMERIC(10,6),
+        pickup_lng NUMERIC(10,6),
+        dest_lat NUMERIC(10,6),
+        dest_lng NUMERIC(10,6),
+        fare NUMERIC(10,2),
+        driver_earning NUMERIC(10,2),
+        admin_commission NUMERIC(10,2),
+        payment_method VARCHAR(20),
+        otp VARCHAR(10),
+        status VARCHAR(20) DEFAULT 'Pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 4. Create driver incentive progress table
     await client.query(`
       CREATE TABLE IF NOT EXISTS driver_incentive_progress (
           id SERIAL PRIMARY KEY,
@@ -108,6 +148,53 @@ async function initializeDatabase() {
       );
     `);
 
+    // 5. Create admin settings table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS admin_settings (
+        id SERIAL PRIMARY KEY,
+        app_name VARCHAR(50) DEFAULT 'SwamiCab',
+        support_email VARCHAR(100) DEFAULT 'support@swamicab.com',
+        currency VARCHAR(10) DEFAULT '₹',
+        time_zone VARCHAR(50) DEFAULT 'Asia/Kolkata',
+        commission_percentage NUMERIC(5,2) DEFAULT 10.00,
+        base_booking_fee NUMERIC(10,2) DEFAULT 15.00,
+        cancellation_fee NUMERIC(10,2) DEFAULT 30.00,
+        driver_payout_cycle VARCHAR(20) DEFAULT 'Weekly',
+        account_holder_name VARCHAR(100),
+        account_number VARCHAR(50),
+        ifsc_code VARCHAR(20),
+        bank_name VARCHAR(100),
+        upi_id VARCHAR(100)
+      );
+    `);
+
+    // 6. Create driver withdrawals table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS driver_withdrawals (
+        id SERIAL PRIMARY KEY,
+        driver_id INT REFERENCES users(id) ON DELETE CASCADE,
+        amount NUMERIC(10,2),
+        transfer_id VARCHAR(100),
+        gateway_status VARCHAR(50),
+        status VARCHAR(20) DEFAULT 'Pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 7. Create driver profiles table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS driver_profiles (
+        id SERIAL PRIMARY KEY,
+        user_id INT REFERENCES users(id) ON DELETE CASCADE,
+        vehicle_number VARCHAR(50),
+        vehicle_model VARCHAR(100),
+        vehicle_category VARCHAR(50),
+        is_online BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Extra backward-compatibility alters
     await client.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_local NUMERIC(10,2) DEFAULT 20.00;`);
     await client.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS per_km_outstation NUMERIC(10,2) DEFAULT 15.00;`);
     await client.query(`ALTER TABLE rate_cards ADD COLUMN IF NOT EXISTS is_outstation_allowed BOOLEAN DEFAULT TRUE;`);
@@ -116,7 +203,7 @@ async function initializeDatabase() {
     await client.query(`ALTER TABLE rides ADD COLUMN IF NOT EXISTS driver_id INT REFERENCES users(id);`);
 
     client.release();
-    console.log('✅ Database schemas, driver tracking, and ride columns auto-verified and migrated successfully.');
+    console.log('✅ All SwamiCab database schemas and tables verified and created successfully.');
   } catch (err) {
     if (client) client.release(true);
     console.error('⚠️ Database Auto-Migration Notice:', err.message);
