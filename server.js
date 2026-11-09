@@ -636,6 +636,45 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
   }
 });
 
+// ==================== RIDE HISTORY API ====================
+app.get('/api/rides/history', async (req, res) => {
+  const { userId } = req.query;
+  try {
+    const ridesRes = await pool.query(
+      `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
+              r.status, 'Pune' as "pickupCity", r.pickup as "pickupAddress", 
+              'Pune' as "dropCity", r.destination as "dropAddress", 
+              TO_CHAR(r.created_at, 'DD Mon') as date, 
+              TO_CHAR(r.created_at, 'HH12:MI AM') as time, 
+              r.fare, COALESCE(u.full_name, 'Assigned Driver') as "driverName", 
+              COALESCE(dp.vehicle_number, 'MH 12 XX 0000') as "vehicleRegNo"
+       FROM rides r
+       LEFT JOIN users u ON r.driver_id = u.id
+       LEFT JOIN driver_profiles dp ON u.id = dp.user_id
+       WHERE r.rider_id = $1
+       ORDER BY r.created_at DESC`,
+      [userId || 1]
+    );
+    res.json(ridesRes.rows);
+  } catch (err) {
+    console.error('Fetch ride history error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ==================== USER WALLET BALANCE API ====================
+app.get('/api/wallet/balance', async (req, res) => {
+  const { userId } = req.query;
+  try {
+    const userRes = await pool.query('SELECT wallet_balance FROM users WHERE id = $1', [userId || 1]);
+    const balance = parseFloat(userRes.rows[0]?.wallet_balance || 0.00);
+    res.json({ success: true, balance });
+  } catch (err) {
+    console.error('Fetch wallet balance error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==================== SECURE ADMIN AUTH & PROFILE APIS ====================
 
 app.post('/api/admin/login', async (req, res) => {
