@@ -642,7 +642,13 @@ app.get('/api/rides/history', async (req, res) => {
   try {
     const ridesRes = await pool.query(
       `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
-              r.status, 'Pune' as "pickupCity", r.pickup as "pickupAddress", 
+              CASE 
+                WHEN r.status = 'Cancelled' THEN 'CANCELLED'
+                WHEN r.status = 'Accepted' OR r.status = 'Pending' THEN 'UPCOMING'
+                WHEN r.status = 'Ongoing' THEN 'ONGOING'
+                ELSE 'COMPLETED'
+              END as status, 
+              'Pune' as "pickupCity", r.pickup as "pickupAddress", 
               'Pune' as "dropCity", r.destination as "dropAddress", 
               TO_CHAR(r.created_at, 'DD Mon') as date, 
               TO_CHAR(r.created_at, 'HH12:MI AM') as time, 
@@ -661,7 +667,6 @@ app.get('/api/rides/history', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
 // ==================== USER WALLET BALANCE API ====================
 app.get('/api/wallet/balance', async (req, res) => {
   const { userId } = req.query;
