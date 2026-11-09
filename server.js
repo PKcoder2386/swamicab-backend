@@ -643,10 +643,10 @@ app.get('/api/rides/history', async (req, res) => {
     const ridesRes = await pool.query(
       `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
               CASE 
-                WHEN r.status = 'Cancelled' THEN 'CANCELLED'
-                WHEN r.status = 'Accepted' OR r.status = 'Pending' THEN 'UPCOMING'
-                WHEN r.status = 'Ongoing' THEN 'ONGOING'
-                ELSE 'COMPLETED'
+                WHEN LOWER(r.status) = 'cancelled' THEN 'CANCELLED'
+                WHEN LOWER(r.status) = 'completed' THEN 'COMPLETED'
+                WHEN LOWER(r.status) = 'ongoing' THEN 'ONGOING'
+                ELSE 'UPCOMING'
               END as status, 
               'Pune' as "pickupCity", r.pickup as "pickupAddress", 
               'Pune' as "dropCity", r.destination as "dropAddress", 
@@ -657,9 +657,9 @@ app.get('/api/rides/history', async (req, res) => {
        FROM rides r
        LEFT JOIN users u ON r.driver_id = u.id
        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-       WHERE r.rider_id = $1
+       WHERE r.rider_id = $1 OR $1 IS NULL
        ORDER BY r.created_at DESC`,
-      [userId || 1]
+      [userId && userId !== "null" ? userId : 1]
     );
     res.json(ridesRes.rows);
   } catch (err) {
