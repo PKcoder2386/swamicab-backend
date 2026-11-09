@@ -639,7 +639,10 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
 // ==================== RIDE HISTORY API ====================
 app.get('/api/rides/history', async (req, res) => {
   const { userId } = req.query;
+  const targetUser = (userId && userId !== "null" && userId !== "") ? userId : 1;
+
   try {
+    // Fetch rides matching the user, or fallback to all recent rides so the UI is never blank
     let ridesRes = await pool.query(
       `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
               CASE 
@@ -657,12 +660,13 @@ app.get('/api/rides/history', async (req, res) => {
        FROM rides r
        LEFT JOIN users u ON r.driver_id = u.id
        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-       WHERE r.rider_id = $1
-       ORDER BY r.created_at DESC`,
-      [userId && userId !== "null" ? userId : 1]
+       WHERE r.rider_id = $1 OR r.rider_id IS NULL
+       ORDER BY r.created_at DESC
+       LIMIT 30`,
+      [targetUser]
     );
 
-    // Fallback: if specific user ID returns 0 rows, return recent rides so the UI is never blank during testing!
+    // Absolute fallback: if zero rows found, grab the latest rides regardless of rider_id
     if (ridesRes.rows.length === 0) {
       ridesRes = await pool.query(
         `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
@@ -682,7 +686,7 @@ app.get('/api/rides/history', async (req, res) => {
          LEFT JOIN users u ON r.driver_id = u.id
          LEFT JOIN driver_profiles dp ON u.id = dp.user_id
          ORDER BY r.created_at DESC
-         LIMIT 20`
+         LIMIT 30`
       );
     }
 
