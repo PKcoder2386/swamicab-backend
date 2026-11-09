@@ -642,8 +642,7 @@ app.get('/api/rides/history', async (req, res) => {
   const targetUser = (userId && userId !== "null" && userId !== "") ? userId : 1;
 
   try {
-    // Fetch rides matching the user, or fallback to all recent rides so the UI is never blank
-    let ridesRes = await pool.query(
+    const ridesRes = await pool.query(
       `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
               CASE 
                 WHEN LOWER(r.status) = 'cancelled' THEN 'CANCELLED'
@@ -660,36 +659,9 @@ app.get('/api/rides/history', async (req, res) => {
        FROM rides r
        LEFT JOIN users u ON r.driver_id = u.id
        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-       WHERE r.rider_id = $1 OR r.rider_id IS NULL
        ORDER BY r.created_at DESC
-       LIMIT 30`,
-      [targetUser]
+       LIMIT 30`
     );
-
-    // Absolute fallback: if zero rows found, grab the latest rides regardless of rider_id
-    if (ridesRes.rows.length === 0) {
-      ridesRes = await pool.query(
-        `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
-                CASE 
-                  WHEN LOWER(r.status) = 'cancelled' THEN 'CANCELLED'
-                  WHEN LOWER(r.status) = 'completed' THEN 'COMPLETED'
-                  WHEN LOWER(r.status) = 'ongoing' THEN 'ONGOING'
-                  ELSE 'UPCOMING'
-                END as status, 
-                'Pune' as "pickupCity", r.pickup as "pickupAddress", 
-                'Pune' as "dropCity", r.destination as "dropAddress", 
-                TO_CHAR(r.created_at, 'DD Mon') as date, 
-                TO_CHAR(r.created_at, 'HH12:MI AM') as time, 
-                r.fare, COALESCE(u.full_name, 'Assigned Driver') as "driverName", 
-                COALESCE(dp.vehicle_number, 'MH 12 XX 0000') as "vehicleRegNo"
-         FROM rides r
-         LEFT JOIN users u ON r.driver_id = u.id
-         LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-         ORDER BY r.created_at DESC
-         LIMIT 30`
-      );
-    }
-
     res.json(ridesRes.rows);
   } catch (err) {
     console.error('Fetch ride history error:', err.message);
