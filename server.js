@@ -382,7 +382,7 @@ app.get('/api/drivers/nearby-count', async (req, res) => {
 });
 
 // ==================== MARKET FARE ESTIMATION & OUTSTATION RATE ENGINE ====================
-app.post('/api/rides/estimate', async (req, res) => {
+const handleEstimateRide = async (req, res) => {
   const { distanceKm, vehicleCategory, isOutstation, tripType, bookingMode } = req.body;
   try {
     const categoryLower = String(vehicleCategory || 'Mini').toLowerCase();
@@ -418,10 +418,8 @@ app.post('/api/rides/estimate', async (req, res) => {
       rawDistanceForCalc = effectiveDistance * 2; // Round trip multiplies distance by 2
     }
 
-    // Calculation: Base Fare + (Distance * Rate)
     let calculatedFare = baseFare + (rawDistanceForCalc * activePerKm);
     
-    // Add night time allowance if applicable
     let nightAllowance = 0;
     if (rate.night_surge) {
       nightAllowance = 138; 
@@ -451,10 +449,13 @@ app.post('/api/rides/estimate', async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
-});
+};
+
+app.post('/api/rides/estimate', handleEstimateRide);
+app.post('/rides/estimate', handleEstimateRide); // Fallback without /api/ prefix
 
 // ==================== REAL-TIME RIDE BOOKING & REAL DRIVER ASSIGNMENT ====================
-app.post('/api/rides/book', async (req, res) => {
+const handleBookRide = async (req, res) => {
   const { riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, paymentMode } = req.body;
   
   console.log("📥 [BOOKING REQUEST RECEIVED]:", JSON.stringify(req.body, null, 2));
@@ -541,7 +542,10 @@ app.post('/api/rides/book', async (req, res) => {
     console.error('Ride booking error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
-});
+};
+
+app.post('/api/rides/book', handleBookRide);
+app.post('/rides/book', handleBookRide); // Fallback without /api/ prefix
 
 // ==================== ACCURATE RIDE COMPLETION ENGINE ====================
 app.post('/api/rides/complete-ride', auth, async (req, res) => {
@@ -641,9 +645,8 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
 });
 
 // ==================== RIDE HISTORY API (BULLETPROOF FAILSAFE) ====================
-app.get('/api/rides/history', async (req, res) => {
+const handleRideHistory = async (req, res) => {
   try {
-    // Return all recent rides across the platform so My Rides is NEVER blank regardless of user session mismatches
     const ridesRes = await pool.query(
       `SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
               CASE 
@@ -669,7 +672,10 @@ app.get('/api/rides/history', async (req, res) => {
     console.error('Fetch ride history error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
-});
+};
+
+app.get('/api/rides/history', handleRideHistory);
+app.get('/rides/history', handleRideHistory); // Fallback without /api/ prefix
 
 // ==================== USER WALLET BALANCE API ====================
 app.get('/api/wallet/balance', async (req, res) => {
