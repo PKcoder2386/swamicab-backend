@@ -614,26 +614,31 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
   }
 });
 
-// ==================== RIDE HISTORY API (FAILSAFE AUTO-FALLBACK) ====================
+// ==================== RIDE HISTORY API (DYNAMIC & REAL-TIME) ====================
 const handleRideHistory = async (req, res) => {
   try {
     const rawUserId = req.query.userId || req.query.riderId;
     const userId = (rawUserId && rawUserId !== "null" && rawUserId !== "undefined") ? parseInt(rawUserId, 10) : null;
     
     let baseQuery = `
-      SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
+      SELECT r.ride_id as id, 
+              r.vehicle_category as "vehicleType", 
+              COALESCE(dp.vehicle_model, r.vehicle_category || ' Standard') as "vehicleModel", 
               CASE 
                 WHEN LOWER(r.status) = 'cancelled' THEN 'CANCELLED'
                 WHEN LOWER(r.status) = 'completed' THEN 'COMPLETED'
                 WHEN LOWER(r.status) = 'ongoing' THEN 'ONGOING'
-                ELSE 'UPCOMING'
+                WHEN LOWER(r.status) = 'accepted' THEN 'UPCOMING'
+                ELSE COALESCE(UPPER(r.status), 'UPCOMING')
               END as status, 
               'Pune' as "pickupCity", r.pickup as "pickupAddress", 
               'Pune' as "dropCity", r.destination as "dropAddress", 
               TO_CHAR(r.created_at, 'DD Mon') as date, 
               TO_CHAR(r.created_at, 'HH12:MI AM') as time, 
-              r.fare, COALESCE(u.full_name, 'Driver Assigned') as "driverName", 
-              COALESCE(dp.vehicle_number, 'MH 12 AB 1234') as "vehicleRegNo"
+              r.fare, 
+              COALESCE(u.full_name, 'Driver Assigned') as "driverName", 
+              COALESCE(dp.vehicle_number, 'MH 12 AB 1234') as "vehicleRegNo",
+              COALESCE(u.phone_number, '9876543210') as "driverPhone"
        FROM rides r
        LEFT JOIN users u ON r.driver_id = u.id
        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
