@@ -627,10 +627,12 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
   }
 });
 
-// ==================== RIDE HISTORY API (BULLETPROOF UNFILTERED FAILSAFE) ====================
+// ==================== RIDE HISTORY API (USER SPECIFIC & FAILSAFE) ====================
 const handleRideHistory = async (req, res) => {
   try {
-    const query = `
+    const userId = req.query.userId || req.query.riderId;
+    
+    let query = `
       SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
               CASE 
                 WHEN LOWER(r.status) = 'cancelled' THEN 'CANCELLED'
@@ -647,10 +649,17 @@ const handleRideHistory = async (req, res) => {
        FROM rides r
        LEFT JOIN users u ON r.driver_id = u.id
        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-       ORDER BY r.created_at DESC LIMIT 50
     `;
 
-    const ridesRes = await pool.query(query);
+    let values = [];
+    if (userId) {
+      query += ` WHERE r.rider_id = $1 OR r.driver_id = $1 `;
+      values.push(userId);
+    }
+
+    query += ` ORDER BY r.created_at DESC LIMIT 50`;
+
+    const ridesRes = await pool.query(query, values);
     res.json(ridesRes.rows);
   } catch (err) {
     console.error('Fetch ride history error:', err.message);
@@ -1046,4 +1055,4 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`SwamiCab Backend Active Engine running on port ${PORT}`));
+server.listen(PORT, () => console.log(`SwamiCab Active Engine running on port ${PORT}`));
