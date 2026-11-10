@@ -82,20 +82,20 @@ CREATE TABLE IF NOT EXISTS driver_incentive_progress (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Rides Table with Real-time Financial Breakdown (28% Split)
+-- Rides Table Aligned with server.js Inserts & History Queries
 CREATE TABLE IF NOT EXISTS rides (
-    id SERIAL PRIMARY KEY,
-    ride_id VARCHAR(50) UNIQUE,
+    ride_id SERIAL PRIMARY KEY,
     rider_id INT REFERENCES users(id),
     driver_id INT REFERENCES users(id),
     rider_name VARCHAR(255),
     driver_name VARCHAR(255),
-    vehicle VARCHAR(50),
+    vehicle VARCHAR(50) DEFAULT 'Sedan',
+    vehicle_category VARCHAR(50) DEFAULT 'Mini',
     distance NUMERIC(10,2),
     fare NUMERIC(10,2),
     admin_commission NUMERIC(10,2) DEFAULT 0.00,
     driver_earning NUMERIC(10,2) DEFAULT 0.00,
-    status VARCHAR(50) DEFAULT 'Completed',
+    status VARCHAR(50) DEFAULT 'Pending',
     payment_method VARCHAR(50) DEFAULT 'UPI',
     pickup TEXT,
     destination TEXT,

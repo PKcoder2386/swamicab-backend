@@ -454,7 +454,7 @@ app.post('/api/rides/estimate', async (req, res) => {
 });
 
 // ==================== REAL-TIME RIDE BOOKING & REAL DRIVER ASSIGNMENT ====================
-app.post('/api/rides/book', auth, async (req, res) => {
+app.post('/api/rides/book', async (req, res) => {
   const { riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, paymentMode } = req.body;
   
   console.log("📥 [BOOKING REQUEST RECEIVED]:", JSON.stringify(req.body, null, 2));
@@ -495,11 +495,12 @@ app.post('/api/rides/book', auth, async (req, res) => {
 
     const driverId = assignedDriver.driver_id;
     const rideStatus = 'Accepted';
+    const finalRiderId = (riderId && riderId !== "null") ? riderId : 1;
 
     const rideRes = await pool.query(
       `INSERT INTO rides (rider_id, driver_id, vehicle_category, pickup, destination, pickup_lat, pickup_lng, dest_lat, dest_lng, fare, driver_earning, admin_commission, payment_method, otp, status)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
-      [riderId || 1, driverId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, driverEarnings, adminCommission, paymentMode, rideOtp, rideStatus]
+      [finalRiderId, driverId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, driverEarnings, adminCommission, paymentMode, rideOtp, rideStatus]
     );
 
     const newRide = rideRes.rows[0];
