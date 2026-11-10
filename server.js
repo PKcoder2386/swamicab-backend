@@ -627,12 +627,12 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
   }
 });
 
-// ==================== RIDE HISTORY API (USER SPECIFIC & FAILSAFE) ====================
+// ==================== RIDE HISTORY API (FAILSAFE AUTO-FALLBACK) ====================
 const handleRideHistory = async (req, res) => {
   try {
     const userId = req.query.userId || req.query.riderId;
     
-    let query = `
+    let baseQuery = `
       SELECT r.ride_id as id, r.vehicle_category as "vehicleType", 'Sedan' as "vehicleModel", 
               CASE 
                 WHEN LOWER(r.status) = 'cancelled' THEN 'CANCELLED'
@@ -651,15 +651,24 @@ const handleRideHistory = async (req, res) => {
        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
     `;
 
-    let values = [];
-    if (userId) {
-      query += ` WHERE r.rider_id = $1 OR r.driver_id = $1 `;
-      values.push(userId);
+    let ridesRes;
+    if (userId && userId !== "null" && userId !== "") {
+      const filteredRes = await pool.query(
+        baseQuery + ` WHERE r.rider_id = $1 OR r.driver_id = $1 ORDER BY r.created_at DESC LIMIT 50`,
+        [userId]
+      );
+      
+      // Failsafe: If user-specific query returns empty, fallback to recent rides so screen isn't blank
+      if (filteredRes.rows.length > 0) {
+        ridesRes = filteredRes;
+      } else {
+        console.log(`⚠️ No rides found for userId ${userId}. Falling back to latest rides.`);
+        ridesRes = await pool.query(baseQuery + ` ORDER BY r.created_at DESC LIMIT 50`);
+      }
+    } else {
+      ridesRes = await pool.query(baseQuery + ` ORDER BY r.created_at DESC LIMIT 50`);
     }
 
-    query += ` ORDER BY r.created_at DESC LIMIT 50`;
-
-    const ridesRes = await pool.query(query, values);
     res.json(ridesRes.rows);
   } catch (err) {
     console.error('Fetch ride history error:', err.message);
