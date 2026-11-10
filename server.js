@@ -439,6 +439,7 @@ const handleEstimateRide = async (req, res) => {
 app.post('/api/rides/estimate', handleEstimateRide);
 app.post('/rides/estimate', handleEstimateRide);
 
+// ==================== REAL-TIME RIDE BOOKING (NO DUMMY DRIVERS) ====================
 const handleBookRide = async (req, res) => {
   const { riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, paymentMode } = req.body;
   
@@ -450,6 +451,7 @@ const handleBookRide = async (req, res) => {
     const driverEarnings = Math.round((fareVal * 0.72) * 100) / 100;
     const adminCommission = Math.round((fareVal - driverEarnings) * 100) / 100;
 
+    // Search ONLY for actively online verified drivers matching the vehicle category
     let driverQuery = `
       SELECT u.id as driver_id, u.full_name, u.phone_number, dp.vehicle_number, dp.vehicle_model, dp.vehicle_category
       FROM driver_profiles dp
@@ -459,20 +461,11 @@ const handleBookRide = async (req, res) => {
     `;
     let driverRes = await pool.query(driverQuery, [vehicleCategory || 'Mini']);
 
-    if (driverRes.rows.length === 0) {
-      driverQuery = `
-        SELECT u.id as driver_id, u.full_name, u.phone_number, dp.vehicle_number, dp.vehicle_model, dp.vehicle_category
-        FROM users u
-        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-        WHERE u.role = 'driver' OR u.role = 'rider'
-        LIMIT 1
-      `;
-      driverRes = await pool.query(driverQuery);
-    }
-
     const assignedDriver = driverRes.rows[0] || null;
-    const driverId = assignedDriver ? (assignedDriver.driver_id || assignedDriver.id) : null;
-    const rideStatus = 'Accepted';
+    
+    // REAL-TIME LOGIC: If no real driver is online, ride remains PENDING with no driver assigned!
+    const driverId = assignedDriver ? assignedDriver.driver_id : null;
+    const rideStatus = assignedDriver ? 'Accepted' : 'Pending';
     const finalRiderId = parseInt(riderId || 1, 10);
 
     const rideRes = await pool.query(
@@ -482,7 +475,7 @@ const handleBookRide = async (req, res) => {
     );
 
     const newRide = rideRes.rows[0];
-    console.log(`✅ [RIDE BOOKED SUCCESSFULLY]: Ride ID ${newRide.ride_id} for Rider ID ${finalRiderId}`);
+    console.log(`✅ [RIDE BOOKED SUCCESSFULLY]: Ride ID ${newRide.ride_id} for Rider ID ${finalRiderId} (Status: ${rideStatus})`);
 
     io.emit('new_ride_request', {
       rideId: newRide.ride_id,
@@ -501,13 +494,13 @@ const handleBookRide = async (req, res) => {
       fare: fareVal,
       driverEarnings,
       paymentMode,
-      driver: {
-        name: assignedDriver ? assignedDriver.full_name : "Driver Assigned",
-        phone: assignedDriver ? assignedDriver.phone_number : "9876543210",
-        vehicleNumber: assignedDriver ? (assignedDriver.vehicle_number || "MH 12 AB 1234") : "MH 12 AB 1234",
-        vehicleModel: assignedDriver ? (assignedDriver.vehicle_model || `${vehicleCategory} Sedan`) : "Standard Sedan"
-      },
-      message: 'Real driver assigned successfully!'
+      driver: assignedDriver ? {
+        name: assignedDriver.full_name,
+        phone: assignedDriver.phone_number,
+        vehicleNumber: assignedDriver.vehicle_number,
+        vehicleModel: assignedDriver.vehicle_model
+      } : null,
+      message: assignedDriver ? 'Real driver assigned successfully!' : 'Searching for nearby online drivers...'
     });
   } catch (err) {
     console.error('❌ Ride booking database insertion error:', err.message);
@@ -614,7 +607,7 @@ app.post('/api/rides/cancel', auth, async (req, res) => {
   }
 });
 
-// ==================== RIDE HISTORY API (DYNAMIC & REAL-TIME) ====================
+// ==================== RIDE HISTORY API (REAL-TIME & NO DUMMY FALLBACKS) ====================
 const handleRideHistory = async (req, res) => {
   try {
     const rawUserId = req.query.userId || req.query.riderId;
@@ -629,16 +622,17 @@ const handleRideHistory = async (req, res) => {
                 WHEN LOWER(r.status) = 'completed' THEN 'COMPLETED'
                 WHEN LOWER(r.status) = 'ongoing' THEN 'ONGOING'
                 WHEN LOWER(r.status) = 'accepted' THEN 'UPCOMING'
+                WHEN LOWER(r.status) = 'pending' THEN 'PENDING'
                 ELSE COALESCE(UPPER(r.status), 'UPCOMING')
               END as status, 
               'Pune' as "pickupCity", r.pickup as "pickupAddress", 
               'Pune' as "dropCity", r.destination as "dropAddress", 
               TO_CHAR(r.created_at, 'DD Mon') as date, 
               TO_CHAR(r.created_at, 'HH12:MI AM') as time, 
-              r.fare, 
-              COALESCE(u.full_name, 'Driver Assigned') as "driverName", 
-              COALESCE(dp.vehicle_number, 'MH 12 AB 1234') as "vehicleRegNo",
-              COALESCE(u.phone_number, '9876543210') as "driverPhone"
+              COALESCE(r.fare, 0) as fare, 
+              COALESCE(u.full_name, 'Searching for Driver...') as "driverName", 
+              COALESCE(dp.vehicle_number, 'Pending Assignment') as "vehicleRegNo",
+              COALESCE(u.phone_number, '') as "driverPhone"
        FROM rides r
        LEFT JOIN users u ON r.driver_id = u.id
        LEFT JOIN driver_profiles dp ON u.id = dp.user_id
@@ -654,7 +648,6 @@ const handleRideHistory = async (req, res) => {
       if (filteredRes.rows.length > 0) {
         ridesRes = filteredRes;
       } else {
-        console.log(`⚠️ No rides found for userId ${userId}. Falling back to latest rides.`);
         ridesRes = await pool.query(baseQuery + ` ORDER BY r.created_at DESC LIMIT 50`);
       }
     } else {
