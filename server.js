@@ -262,7 +262,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
       console.error('⚠️ [Fast2SMS Primary Attempt Failed, trying Fallback Route...]:', smsErr.response?.data || smsErr.message);
       try {
         const fallbackRes = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-          route: 'q',
+          route: 'DLT',
           message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
           language: 'english',
           flash: 0,
@@ -1049,4 +1049,4 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`SwamiCab Active Engine running on port ${PORT}`));
+server.listen(PORT, () => console.log(`SwamiCab Active Engine running on port ${PORT}`)); 
