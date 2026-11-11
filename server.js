@@ -248,7 +248,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
   if (process.env.FAST2SMS_API_KEY) {
     try {
       const response = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-        route: 'otp',
+        route: 'DLT_OTP',
         variables_values: otp,
         numbers: phone
       }, {
@@ -262,7 +262,7 @@ app.post('/api/auth/send-otp', async (req, res) => {
       console.error('⚠️ [Fast2SMS Primary Attempt Failed, trying Fallback Route...]:', smsErr.response?.data || smsErr.message);
       try {
         const fallbackRes = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-          route: 'DLT',
+          route: 'DLT_OTP',
           message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
           language: 'english',
           flash: 0,
