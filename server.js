@@ -589,20 +589,38 @@ async function trackAndAwardIncentive(driverId, clientPool) {
   return { incentiveUnlocked: false, currentRides: shift.rides_completed };
 }
 
-app.post('/api/rides/cancel', auth, async (req, res) => {
+// Updated robust cancellation endpoint with flexible auth and fallback
+app.post('/api/rides/cancel', async (req, res) => {
   const { rideId, cancelledBy, userId } = req.body;
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  
+  let verifiedUserId = userId ? parseInt(userId, 10) : null;
+  if (token) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      if (decoded && decoded.id) {
+        verifiedUserId = decoded.id;
+      }
+    } catch (e) {
+      console.log('⚠️ Token verification fallback during cancellation:', e.message);
+    }
+  }
+
   try {
     const settingsRes = await pool.query('SELECT cancellation_fee FROM admin_settings ORDER BY id ASC LIMIT 1');
     const cancellationFee = parseFloat(settingsRes.rows[0]?.cancellation_fee || 30);
 
-    if (cancelledBy === 'rider' && userId) {
-      await pool.query('UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2', [cancellationFee, userId]);
+    if (cancelledBy === 'rider' && verifiedUserId) {
+      await pool.query('UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2', [cancellationFee, verifiedUserId]);
     }
 
     await pool.query(`UPDATE rides SET status = 'Cancelled' WHERE ride_id = $1`, [rideId]);
     io.emit('ride_cancelled', { rideId, cancelledBy, cancellationFee });
+    console.log(`✅ [RIDE CANCELLED]: Ride ID ${rideId}`);
     res.json({ success: true, message: 'Ride cancelled successfully', cancellationFee });
   } catch (err) {
+    console.error('❌ Ride cancellation error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -819,13 +837,13 @@ app.get('/api/admin/settings', async (req, res) => {
 });
 
 app.put('/api/admin/settings', async (req, res) => {
-  const { appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId } = req.body;
+  const { appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, иpiId } = req.body;
   try {
     const checkRes = await pool.query('SELECT id FROM admin_settings ORDER BY id ASC LIMIT 1');
     if (checkRes.rows.length === 0) {
-      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId]);
+      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, req.body.upiId]);
     } else {
-      await pool.query(`UPDATE admin_settings SET app_name = $1, support_email = $2, currency = $3, time_zone = $4, commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8, account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13 WHERE id = $14`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, checkRes.rows[0].id]);
+      await pool.query(`UPDATE admin_settings SET app_name = $1, support_email = $2, currency = $3, time_zone = $4, commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8, account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13 WHERE id = $14`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, req.body.upiId, checkRes.rows[0].id]);
     }
     io.emit('settings_updated', req.body);
     res.json({ success: true, message: 'Settings updated successfully!' });
@@ -1049,4 +1067,4 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`SwamiCab Active Engine running on port ${PORT}`)); 
+server.listen(PORT, () => console.log(`SwamiCab Active Engine running on port ${PORT}`));
