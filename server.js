@@ -107,6 +107,7 @@ async function initializeDatabase() {
       );
     `);
 
+    // Added XL right after SUV as requested
     await client.query(`
       INSERT INTO rate_cards (category, base_fare, per_km_local, per_km_outstation, per_min, min_fare, night_surge, peak_hour, platform_comm, is_outstation_allowed)
       VALUES 
@@ -114,8 +115,8 @@ async function initializeDatabase() {
       ('Auto', 45.00, 15.00, 12.00, 1.50, 45.00, true, true, 10.00, false),
       ('Mini', 80.00, 20.00, 15.00, 2.00, 80.00, true, true, 10.00, true),
       ('Sedan', 120.00, 25.00, 18.00, 2.50, 120.00, true, true, 10.00, true),
-      ('Prime', 150.00, 30.00, 22.00, 3.00, 150.00, true, true, 10.00, true),
-      ('SUV', 200.00, 35.00, 25.00, 3.50, 200.00, true, true, 10.00, true)
+      ('SUV', 200.00, 35.00, 25.00, 3.50, 200.00, true, true, 10.00, true),
+      ('XL', 150.00, 30.00, 22.00, 3.00, 150.00, true, true, 10.00, true)
       ON CONFLICT (category) DO NOTHING;
     `);
 
@@ -247,11 +248,10 @@ app.post('/api/auth/send-otp', async (req, res) => {
 
   if (process.env.FAST2SMS_API_KEY) {
     try {
-      // Using Fast2SMS DLT Smart OTP Route with your Template ID: 6a5e291c74
       const response = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
         route: 'dlt',
-        sender_id: 'SWAMIC', // Adjust sender ID if required by your DLT setup, or omit if handled automatically
-        message: '6a5e291c74', // Your registered Smart OTP Template ID
+        sender_id: 'SWAMIC',
+        message: '6a5e291c74',
         variables_values: otp,
         numbers: phone
       }, {
@@ -432,7 +432,6 @@ const handleEstimateRide = async (req, res) => {
 app.post('/api/rides/estimate', handleEstimateRide);
 app.post('/rides/estimate', handleEstimateRide);
 
-// ==================== GET RIDE DETAILS BY ID ====================
 app.get('/api/rides/:rideId', async (req, res) => {
   const { rideId } = req.params;
   try {
@@ -481,12 +480,9 @@ app.get('/api/rides/:rideId', async (req, res) => {
   }
 });
 
-// ==================== REAL-TIME RIDE BOOKING (NO DUMMY DRIVERS) ====================
 const handleBookRide = async (req, res) => {
   const { riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, paymentMode } = req.body;
   
-  console.log("📥 [BOOKING REQUEST RECEIVED]:", JSON.stringify(req.body, null, 2));
-
   try {
     const rideOtp = Math.floor(1000 + Math.random() * 9000).toString();
     const fareVal = parseFloat(totalFare || 0);
@@ -515,7 +511,6 @@ const handleBookRide = async (req, res) => {
     );
 
     const newRide = rideRes.rows[0];
-    console.log(`✅ [RIDE BOOKED SUCCESSFULLY]: Ride ID ${newRide.ride_id} for Rider ID ${finalRiderId} (Status: ${rideStatus})`);
 
     io.emit('new_ride_request', {
       rideId: newRide.ride_id,
@@ -579,7 +574,6 @@ app.post('/api/rides/complete-ride', auth, async (req, res) => {
     io.emit('ride_completed', { rideId, totalFare, platformCut, driverEarnings, paymentMode, incentiveResult });
     res.json({ success: true, platformCut, driverEarnings, paymentMode, incentiveResult });
   } catch (err) {
-    console.error('Ride completion error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -641,9 +635,7 @@ app.post('/api/rides/cancel', async (req, res) => {
       if (decoded && decoded.id) {
         verifiedUserId = decoded.id;
       }
-    } catch (e) {
-      console.log('⚠️ Token verification fallback during cancellation:', e.message);
-    }
+    } catch (e) {}
   }
 
   try {
@@ -656,10 +648,8 @@ app.post('/api/rides/cancel', async (req, res) => {
 
     await pool.query(`UPDATE rides SET status = 'Cancelled' WHERE ride_id = $1`, [rideId]);
     io.emit('ride_cancelled', { rideId, cancelledBy, cancellationFee });
-    console.log(`✅ [RIDE CANCELLED]: Ride ID ${rideId}`);
     res.json({ success: true, message: 'Ride cancelled successfully', cancellationFee });
   } catch (err) {
-    console.error('❌ Ride cancellation error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -712,7 +702,6 @@ const handleRideHistory = async (req, res) => {
 
     res.json(ridesRes.rows);
   } catch (err) {
-    console.error('Fetch ride history error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 };
@@ -727,7 +716,6 @@ app.get('/api/wallet/balance', async (req, res) => {
     const balance = parseFloat(userRes.rows[0]?.wallet_balance || 0.00);
     res.json({ success: true, balance });
   } catch (err) {
-    console.error('Fetch wallet balance error:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -914,7 +902,6 @@ app.get('/api/admin/rate-cards', async (req, res) => {
     res.json(formattedRows);
   } catch (err) {
     if (client) client.release(true);
-    console.error('⚠️ Fetch rate cards error (Auto-recovered):', err.message);
     try {
       const fallbackRows = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
       const formattedRows = fallbackRows.rows.map(card => ({
@@ -933,7 +920,6 @@ app.get('/api/admin/rate-cards', async (req, res) => {
       }));
       return res.json(formattedRows);
     } catch (fallbackErr) {
-      console.error('❌ Rate cards fallback failed:', fallbackErr.message);
       res.json([]);
     }
   }
@@ -1012,7 +998,6 @@ app.put('/api/admin/rate-cards', async (req, res) => {
     io.emit('rate_cards_updated');
     res.json({ success: true, message: 'Rate cards updated and persisted successfully' });
   } catch (err) {
-    console.error('❌ Update rate cards error details:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
