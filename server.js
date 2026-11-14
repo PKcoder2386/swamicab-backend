@@ -403,6 +403,7 @@ const handleEstimateRide = async (req, res) => {
       rawDistanceForCalc = effectiveDistance * 2;
     }
 
+    // 1. Calculate Base Fare from Database Rate Card + Per KM + Night Surge
     let calculatedFare = baseFare + (rawDistanceForCalc * activePerKm);
     
     let nightAllowance = 0;
@@ -415,10 +416,13 @@ const handleEstimateRide = async (req, res) => {
     calculatedFare += driverAllowance;
 
     if (calculatedFare < minFare) calculatedFare = minFare;
+
+    // 2. APPLY 28% TOTAL TAX / COMMISSION MULTIPLIER (10% Platform Commission + 18% GST)
+    calculatedFare = calculatedFare * 1.28;
     calculatedFare = Math.round(calculatedFare * 100) / 100;
 
-    const platformCut = Math.round((calculatedFare * (parseFloat(rate.platform_comm || 10) / 100)) * 100) / 100;
-    const driverEarnings = Math.round((calculatedFare - platformCut) * 100) / 100;
+    const platformCut = Math.round((calculatedFare * 0.10) * 100) / 100;
+    const driverEarnings = Math.round((calculatedFare - platformCut - (calculatedFare * 0.18)) * 100) / 100;
 
     res.json({
       success: true,
@@ -429,6 +433,11 @@ const handleEstimateRide = async (req, res) => {
       effectiveDistance,
       nightAllowance,
       driverAllowance,
+      taxBreakdown: {
+        gstPercentage: 18,
+        commissionPercentage: 10,
+        totalMultiplier: "28% (10% Comm + 18% GST)"
+      },
       tollNotice: isOutstation ? "Toll and Parking not included" : null
     });
   } catch (err) {
