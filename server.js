@@ -242,13 +242,16 @@ app.post('/api/auth/send-otp', async (req, res) => {
   otpStorage[phone] = otp;
 
   console.log(`\n========================================`);
-  console.log(`🔐 [OTP AUTH] Phone: ${phone} | Code: ${otp}`);
+  console.log(`🔐 [SMART OTP AUTH] Phone: ${phone} | Code: ${otp}`);
   console.log(`========================================\n`);
 
   if (process.env.FAST2SMS_API_KEY) {
     try {
+      // Using Fast2SMS DLT Smart OTP Route with your Template ID: 6a5e291c74
       const response = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-        route: 'otp',
+        route: 'dlt',
+        sender_id: 'SWAMIC', // Adjust sender ID if required by your DLT setup, or omit if handled automatically
+        message: '6a5e291c74', // Your registered Smart OTP Template ID
         variables_values: otp,
         numbers: phone
       }, {
@@ -257,26 +260,9 @@ app.post('/api/auth/send-otp', async (req, res) => {
           'Content-Type': 'application/json'
         }
       });
-      console.log(`📱 [FAST2SMS Success]:`, response.data);
+      console.log(`📱 [Fast2SMS Smart OTP Success]:`, response.data);
     } catch (smsErr) {
-      console.error('⚠️ [Fast2SMS Primary Attempt Failed, trying Fallback Route...]:', smsErr.response?.data || smsErr.message);
-      try {
-        const fallbackRes = await axios.post('https://www.fast2sms.com/dev/bulkV2', {
-          route: 'q',
-          message: `Your SwamiCab verification code is ${otp}. Valid for 10 minutes.`,
-          language: 'english',
-          flash: 0,
-          numbers: phone
-        }, {
-          headers: {
-            'authorization': process.env.FAST2SMS_API_KEY,
-            'Content-Type': 'application/json'
-          }
-        });
-        console.log(`📱 [FAST2SMS Fallback Success]:`, fallbackRes.data);
-      } catch (fallbackErr) {
-        console.error('❌ [FAST2SMS Fallback Error]:', fallbackErr.response?.data || fallbackErr.message);
-      }
+      console.error('❌ [Fast2SMS Smart OTP Error]:', smsErr.response?.data || smsErr.message);
     }
   }
 
@@ -403,7 +389,6 @@ const handleEstimateRide = async (req, res) => {
       rawDistanceForCalc = effectiveDistance * 2;
     }
 
-    // 1. Calculate Base Fare from Database Rate Card + Per KM + Night Surge
     let calculatedFare = baseFare + (rawDistanceForCalc * activePerKm);
     
     let nightAllowance = 0;
@@ -417,7 +402,6 @@ const handleEstimateRide = async (req, res) => {
 
     if (calculatedFare < minFare) calculatedFare = minFare;
 
-    // 2. APPLY 28% TOTAL TAX / COMMISSION MULTIPLIER (10% Platform Commission + 18% GST)
     calculatedFare = calculatedFare * 1.28;
     calculatedFare = Math.round(calculatedFare * 100) / 100;
 
