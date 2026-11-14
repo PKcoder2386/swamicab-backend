@@ -439,6 +439,55 @@ const handleEstimateRide = async (req, res) => {
 app.post('/api/rides/estimate', handleEstimateRide);
 app.post('/rides/estimate', handleEstimateRide);
 
+// ==================== GET RIDE DETAILS BY ID ====================
+app.get('/api/rides/:rideId', async (req, res) => {
+  const { rideId } = req.params;
+  try {
+    const rideRes = await pool.query(`
+      SELECT r.ride_id as "rideId",
+             r.rider_id as "riderId",
+             r.driver_id as "driverId",
+             r.vehicle_category as "vehicleCategory",
+             r.pickup as "pickupAddress",
+             r.destination as "destinationAddress",
+             r.fare,
+             r.otp,
+             r.status,
+             u.full_name as "driverName",
+             u.phone_number as "driverPhone",
+             dp.vehicle_number as "vehicleNumber",
+             dp.vehicle_model as "vehicleModel"
+      FROM rides r
+      LEFT JOIN users u ON r.driver_id = u.id
+      LEFT JOIN driver_profiles dp ON u.id = dp.user_id
+      WHERE r.ride_id = $1
+    `, [rideId]);
+
+    if (rideRes.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Ride not found' });
+    }
+
+    const ride = rideRes.rows[0];
+    res.json({
+      success: true,
+      rideId: ride.rideId,
+      driverId: ride.driverId,
+      driverName: ride.driverName || 'Assigned Partner',
+      driverPhone: ride.driverPhone || '',
+      vehicleNumber: ride.vehicleNumber || 'SwamiCab',
+      vehicleModel: ride.vehicleModel || ride.vehicleCategory,
+      otp: ride.otp,
+      pickupAddress: ride.pickupAddress,
+      destinationAddress: ride.destinationAddress,
+      status: ride.status,
+      fare: ride.fare
+    });
+  } catch (err) {
+    console.error('❌ Fetch single ride error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==================== REAL-TIME RIDE BOOKING (NO DUMMY DRIVERS) ====================
 const handleBookRide = async (req, res) => {
   const { riderId, vehicleCategory, pickupAddress, destinationAddress, pickupLat, pickupLng, destLat, destLng, totalFare, paymentMode } = req.body;
@@ -451,7 +500,6 @@ const handleBookRide = async (req, res) => {
     const driverEarnings = Math.round((fareVal * 0.72) * 100) / 100;
     const adminCommission = Math.round((fareVal - driverEarnings) * 100) / 100;
 
-    // Search ONLY for actively online verified drivers matching the vehicle category
     let driverQuery = `
       SELECT u.id as driver_id, u.full_name, u.phone_number, dp.vehicle_number, dp.vehicle_model, dp.vehicle_category
       FROM driver_profiles dp
@@ -463,7 +511,6 @@ const handleBookRide = async (req, res) => {
 
     const assignedDriver = driverRes.rows[0] || null;
     
-    // REAL-TIME LOGIC: If no real driver is online, ride remains PENDING with no driver assigned!
     const driverId = assignedDriver ? assignedDriver.driver_id : null;
     const rideStatus = assignedDriver ? 'Accepted' : 'Pending';
     const finalRiderId = parseInt(riderId || 1, 10);
@@ -589,7 +636,6 @@ async function trackAndAwardIncentive(driverId, clientPool) {
   return { incentiveUnlocked: false, currentRides: shift.rides_completed };
 }
 
-// Updated robust cancellation endpoint with flexible auth and fallback
 app.post('/api/rides/cancel', async (req, res) => {
   const { rideId, cancelledBy, userId } = req.body;
   const header = req.headers.authorization || '';
@@ -625,7 +671,6 @@ app.post('/api/rides/cancel', async (req, res) => {
   }
 });
 
-// ==================== RIDE HISTORY API (REAL-TIME & NO DUMMY FALLBACKS) ====================
 const handleRideHistory = async (req, res) => {
   try {
     const rawUserId = req.query.userId || req.query.riderId;
