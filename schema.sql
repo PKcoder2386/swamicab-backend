@@ -130,8 +130,8 @@ VALUES
 ('Auto', 45.00, 15.00, 12.00, 1.50, 45.00, true, true, 10.00, false),
 ('Mini', 80.00, 20.00, 15.00, 2.00, 80.00, true, true, 10.00, true),
 ('Sedan', 120.00, 25.00, 18.00, 2.50, 120.00, true, true, 10.00, true),
-('SUV', 200.00, 35.00, 25.00, 3.50, 200.00, true, true, 10.00, true),
-('XL', 150.00, 30.00, 22.00, 3.00, 150.00, true, true, 10.00, true)
+('SUV', 180.00, 30.00, 22.00, 3.00, 180.00, true, true, 10.00, true),
+('XL', 220.00, 35.00, 25.00, 3.50, 220.00, true, true, 10.00, true)
 ON CONFLICT (category) DO UPDATE SET 
     base_fare = EXCLUDED.base_fare,
     per_km_local = EXCLUDED.per_km_local,
