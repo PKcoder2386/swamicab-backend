@@ -115,8 +115,8 @@ async function initializeDatabase() {
       ('Auto', 45.00, 15.00, 12.00, 1.50, 45.00, true, true, 10.00, false),
       ('Mini', 80.00, 20.00, 15.00, 2.00, 80.00, true, true, 10.00, true),
       ('Sedan', 120.00, 25.00, 18.00, 2.50, 120.00, true, true, 10.00, true),
-      ('SUV', 200.00, 35.00, 25.00, 3.50, 200.00, true, true, 10.00, true),
-      ('XL', 150.00, 30.00, 22.00, 3.00, 150.00, true, true, 10.00, true)
+      ('SUV', 180.00, 30.00, 22.00, 3.00, 180.00, true, true, 10.00, true),
+      ('XL', 220.00, 35.00, 25.00, 3.50, 220.00, true, true, 10.00, true)
       ON CONFLICT (category) DO UPDATE SET 
         base_fare = EXCLUDED.base_fare,
         per_km_local = EXCLUDED.per_km_local,
@@ -368,7 +368,8 @@ app.get('/api/drivers/nearby-count', async (req, res) => {
 const handleEstimateRide = async (req, res) => {
   const { distanceKm, vehicleCategory, isOutstation, tripType, bookingMode } = req.body;
   try {
-    const categoryLower = String(vehicleCategory || 'Mini').toLowerCase();
+    const categoryQuery = String(vehicleCategory || 'Mini').trim();
+    const categoryLower = categoryQuery.toLowerCase();
 
     if (categoryLower === 'bike' && bookingMode !== 'PARCEL') {
       return res.status(400).json({ success: false, error: 'Bike is exclusively reserved for parcel deliveries.' });
@@ -378,9 +379,10 @@ const handleEstimateRide = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Auto is not allowed for outstation rides.' });
     }
 
+    // Strict case-insensitive query with trimming
     const rateRes = await pool.query(
-      'SELECT * FROM rate_cards WHERE LOWER(category) = LOWER($1)', 
-      [vehicleCategory || 'Mini']
+      'SELECT * FROM rate_cards WHERE TRIM(LOWER(category)) = TRIM(LOWER($1))', 
+      [categoryQuery]
     );
 
     const rate = rateRes.rows[0] || { base_fare: 80, per_km_local: 20, per_km_outstation: 15, min_fare: 80, night_surge: true, platform_comm: 10 };
