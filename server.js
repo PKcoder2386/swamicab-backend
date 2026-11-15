@@ -107,7 +107,7 @@ async function initializeDatabase() {
       );
     `);
 
-    // Added XL right after SUV as requested
+    // Seed default rate cards in order: Bike, Auto, Mini, Sedan, SUV, XL
     await client.query(`
       INSERT INTO rate_cards (category, base_fare, per_km_local, per_km_outstation, per_min, min_fare, night_surge, peak_hour, platform_comm, is_outstation_allowed)
       VALUES 
@@ -117,8 +117,20 @@ async function initializeDatabase() {
       ('Sedan', 120.00, 25.00, 18.00, 2.50, 120.00, true, true, 10.00, true),
       ('SUV', 200.00, 35.00, 25.00, 3.50, 200.00, true, true, 10.00, true),
       ('XL', 150.00, 30.00, 22.00, 3.00, 150.00, true, true, 10.00, true)
-      ON CONFLICT (category) DO NOTHING;
+      ON CONFLICT (category) DO UPDATE SET 
+        base_fare = EXCLUDED.base_fare,
+        per_km_local = EXCLUDED.per_km_local,
+        per_km_outstation = EXCLUDED.per_km_outstation,
+        per_min = EXCLUDED.per_min,
+        min_fare = EXCLUDED.min_fare,
+        night_surge = EXCLUDED.night_surge,
+        peak_hour = EXCLUDED.peak_hour,
+        platform_comm = EXCLUDED.platform_comm,
+        is_outstation_allowed = EXCLUDED.is_outstation_allowed;
     `);
+
+    // Remove legacy Prime if it exists in database
+    await client.query(`DELETE FROM rate_cards WHERE category = 'Prime';`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS rides (
@@ -381,7 +393,7 @@ const handleEstimateRide = async (req, res) => {
 
     let effectiveDistance = parseFloat(distanceKm || 0);
     if (effectiveDistance <= 0) {
-      effectiveDistance = 148.0;
+      effectiveDistance = 5.0;
     }
 
     let rawDistanceForCalc = effectiveDistance;
@@ -393,11 +405,11 @@ const handleEstimateRide = async (req, res) => {
     
     let nightAllowance = 0;
     if (rate.night_surge) {
-      nightAllowance = 138; 
+      nightAllowance = 20; 
       calculatedFare += nightAllowance;
     }
 
-    let driverAllowance = isOutstation ? 332 : 0;
+    let driverAllowance = isOutstation ? 100 : 0;
     calculatedFare += driverAllowance;
 
     if (calculatedFare < minFare) calculatedFare = minFare;
@@ -863,13 +875,13 @@ app.get('/api/admin/settings', async (req, res) => {
 });
 
 app.put('/api/admin/settings', async (req, res) => {
-  const { appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, иpiId } = req.body;
+  const { appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId } = req.body;
   try {
     const checkRes = await pool.query('SELECT id FROM admin_settings ORDER BY id ASC LIMIT 1');
     if (checkRes.rows.length === 0) {
-      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, req.body.upiId]);
+      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId]);
     } else {
-      await pool.query(`UPDATE admin_settings SET app_name = $1, support_email = $2, currency = $3, time_zone = $4, commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8, account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13 WHERE id = $14`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, req.body.upiId, checkRes.rows[0].id]);
+      await pool.query(`UPDATE admin_settings SET app_name = $1, support_email = $2, currency = $3, time_zone = $4, commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8, account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13 WHERE id = $14`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, checkRes.rows[0].id]);
     }
     io.emit('settings_updated', req.body);
     res.json({ success: true, message: 'Settings updated successfully!' });
@@ -879,12 +891,8 @@ app.put('/api/admin/settings', async (req, res) => {
 });
 
 app.get('/api/admin/rate-cards', async (req, res) => {
-  let client;
   try {
-    client = await pool.connect();
-    const { rows } = await client.query("SELECT * FROM rate_cards ORDER BY id ASC");
-    client.release();
-
+    const { rows } = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
     const formattedRows = rows.map(card => ({
       id: card.id,
       category: card.category,
@@ -901,27 +909,7 @@ app.get('/api/admin/rate-cards', async (req, res) => {
     }));
     res.json(formattedRows);
   } catch (err) {
-    if (client) client.release(true);
-    try {
-      const fallbackRows = await pool.query("SELECT * FROM rate_cards ORDER BY id ASC");
-      const formattedRows = fallbackRows.rows.map(card => ({
-        id: card.id,
-        category: card.category,
-        baseFare: parseFloat(card.base_fare || 80),
-        perKm: parseFloat(card.per_km_local || card.per_km || 20),
-        perKmLocal: parseFloat(card.per_km_local || 20),
-        perKmOutstation: parseFloat(card.per_km_outstation || 15),
-        perMin: parseFloat(card.per_min || 2),
-        minFare: parseFloat(card.min_fare || 80),
-        nightSurge: card.night_surge || false,
-        peakHour: card.peak_hour || false,
-        platformComm: parseFloat(card.platform_comm || 10),
-        isOutstationAllowed: card.is_outstation_allowed ?? (card.category.toLowerCase() !== 'auto' && card.category.toLowerCase() !== 'bike')
-      }));
-      return res.json(formattedRows);
-    } catch (fallbackErr) {
-      res.json([]);
-    }
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -935,64 +923,42 @@ app.put('/api/admin/rate-cards', async (req, res) => {
     for (const card of rateCards) {
       if (!card.category) continue;
 
-      if (card.id) {
-        await pool.query(`
-          UPDATE rate_cards 
-          SET category = $1, 
-              base_fare = $2, 
-              per_km = $3, 
-              per_km_local = $4, 
-              per_min = $5, 
-              min_fare = $6, 
-              night_surge = $7, 
-              peak_hour = $8, 
-              platform_comm = $9, 
-              per_km_outstation = $10, 
-              is_outstation_allowed = $11
-          WHERE id = $12
-        `, [
-          card.category,
-          parseFloat(card.baseFare || 80),
-          parseFloat(card.perKmLocal || card.perKm || 20),
-          parseFloat(card.perKmLocal || card.perKm || 20),
-          parseFloat(card.perMin || 2),
-          parseFloat(card.minFare || 80),
-          Boolean(card.nightSurge),
-          Boolean(card.peakHour),
-          parseFloat(card.platformComm || 10),
-          parseFloat(card.perKmOutstation || 15),
-          card.isOutstationAllowed ?? true,
-          card.id
-        ]);
-      } else {
-        await pool.query(`
-          INSERT INTO rate_cards (category, base_fare, per_km, per_km_local, per_min, min_fare, night_surge, peak_hour, platform_comm, per_km_outstation, is_outstation_allowed)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-          ON CONFLICT (category) DO UPDATE SET 
-            base_fare = EXCLUDED.base_fare,
-            per_km = EXCLUDED.per_km,
-            per_km_local = EXCLUDED.per_km_local,
-            per_min = EXCLUDED.per_min,
-            min_fare = EXCLUDED.min_fare,
-            night_surge = EXCLUDED.night_surge,
-            peak_hour = EXCLUDED.peak_hour,
-            platform_comm = EXCLUDED.platform_comm,
-            per_km_outstation = EXCLUDED.per_km_outstation,
-            is_outstation_allowed = EXCLUDED.is_outstation_allowed
-        `, [
-          card.category,
-          parseFloat(card.baseFare || 80),
-          parseFloat(card.perKmLocal || card.perKm || 20),
-          parseFloat(card.perKmLocal || card.perKm || 20),
-          parseFloat(card.perMin || 2),
-          parseFloat(card.minFare || 80),
-          Boolean(card.nightSurge),
-          Boolean(card.peakHour),
-          parseFloat(card.platformComm || 10),
-          parseFloat(card.perKmOutstation || 15),
-          card.isOutstationAllowed ?? true
-        ]);
-      }
+      const baseFare = parseFloat(card.baseFare ?? card.base_fare ?? 80);
+      const perKmLocal = parseFloat(card.perKm ?? card.perKmLocal ?? card.per_km_local ?? 20);
+      const perKmOutstation = parseFloat(card.perKmOutstation ?? card.per_km_outstation ?? 15);
+      const perMin = parseFloat(card.perMin ?? card.per_min ?? 2);
+      const minFare = parseFloat(card.minFare ?? card.min_fare ?? 80);
+      const nightSurge = Boolean(card.nightSurge ?? card.night_surge ?? false);
+      const peakHour = Boolean(card.peakHour ?? card.peak_hour ?? false);
+      const platformComm = parseFloat(card.platformComm ?? card.platform_comm ?? 10);
+      const isOutstationAllowed = card.isOutstationAllowed ?? card.is_outstation_allowed ?? true;
+
+      await pool.query(`
+        INSERT INTO rate_cards (category, base_fare, per_km, per_km_local, per_km_outstation, per_min, min_fare, night_surge, peak_hour, platform_comm, is_outstation_allowed)
+        VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (category) DO UPDATE SET 
+          base_fare = EXCLUDED.base_fare,
+          per_km = EXCLUDED.per_km,
+          per_km_local = EXCLUDED.per_km_local,
+          per_km_outstation = EXCLUDED.per_km_outstation,
+          per_min = EXCLUDED.per_min,
+          min_fare = EXCLUDED.min_fare,
+          night_surge = EXCLUDED.night_surge,
+          peak_hour = EXCLUDED.peak_hour,
+          platform_comm = EXCLUDED.platform_comm,
+          is_outstation_allowed = EXCLUDED.is_outstation_allowed
+      `, [
+        card.category,
+        baseFare,
+        perKmLocal,
+        perKmOutstation,
+        perMin,
+        minFare,
+        nightSurge,
+        peakHour,
+        platformComm,
+        isOutstationAllowed
+      ]);
     }
 
     io.emit('rate_cards_updated');
