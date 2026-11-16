@@ -379,7 +379,6 @@ const handleEstimateRide = async (req, res) => {
       return res.status(400).json({ success: false, error: 'Auto is not allowed for outstation rides.' });
     }
 
-    // Strict case-insensitive query with trimming
     const rateRes = await pool.query(
       'SELECT * FROM rate_cards WHERE TRIM(LOWER(category)) = TRIM(LOWER($1))', 
       [categoryQuery]
@@ -678,11 +677,10 @@ const handleRideHistory = async (req, res) => {
               r.vehicle_category as "vehicleType", 
               COALESCE(dp.vehicle_model, r.vehicle_category || ' Standard') as "vehicleModel", 
               CASE 
-                WHEN LOWER(r.status) = 'cancelled' THEN 'CANCELLED'
+                WHEN LOWER(r.status) IN ('cancelled', 'cancel') THEN 'CANCELLED'
                 WHEN LOWER(r.status) = 'completed' THEN 'COMPLETED'
                 WHEN LOWER(r.status) = 'ongoing' THEN 'ONGOING'
-                WHEN LOWER(r.status) = 'accepted' THEN 'UPCOMING'
-                WHEN LOWER(r.status) = 'pending' THEN 'PENDING'
+                WHEN LOWER(r.status) IN ('accepted', 'pending') THEN 'UPCOMING'
                 ELSE COALESCE(UPPER(r.status), 'UPCOMING')
               END as status, 
               'Pune' as "pickupCity", r.pickup as "pickupAddress", 
@@ -881,7 +879,7 @@ app.put('/api/admin/settings', async (req, res) => {
   try {
     const checkRes = await pool.query('SELECT id FROM admin_settings ORDER BY id ASC LIMIT 1');
     if (checkRes.rows.length === 0) {
-      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId]);
+      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, ипиId]);
     } else {
       await pool.query(`UPDATE admin_settings SET app_name = $1, support_email = $2, currency = $3, time_zone = $4, commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8, account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13 WHERE id = $14`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, checkRes.rows[0].id]);
     }
