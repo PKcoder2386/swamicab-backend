@@ -129,7 +129,6 @@ async function initializeDatabase() {
         is_outstation_allowed = EXCLUDED.is_outstation_allowed;
     `);
 
-    // Remove legacy Prime if it exists in database
     await client.query(`DELETE FROM rate_cards WHERE category = 'Prime';`);
 
     await client.query(`
@@ -366,7 +365,7 @@ app.get('/api/drivers/nearby-count', async (req, res) => {
 });
 
 const handleEstimateRide = async (req, res) => {
-  const { distanceKm, vehicleCategory, isOutstation, tripType, bookingMode } = req.body;
+  const { distanceKm, vehicleCategory, isOutstation, tripType, bookingMode, rentalHours } = req.body;
   try {
     const categoryQuery = String(vehicleCategory || 'Mini').trim();
     const categoryLower = categoryQuery.toLowerCase();
@@ -384,38 +383,38 @@ const handleEstimateRide = async (req, res) => {
       [categoryQuery]
     );
 
-    const rate = rateRes.rows[0] || { base_fare: 80, per_km_local: 20, per_km_outstation: 15, min_fare: 80, night_surge: true, platform_comm: 10 };
+    const rate = rateRes.rows[0] || { base_fare: 80, per_km_local: 20, per_km_outstation: 15, per_min: 2, min_fare: 80, night_surge: true, platform_comm: 10 };
     const baseFare = parseFloat(rate.base_fare || 80);
     const perKmLocal = parseFloat(rate.per_km_local || rate.per_km || 20);
     const perKmOutstation = parseFloat(rate.per_km_outstation || 15);
     const minFare = parseFloat(rate.min_fare || 80);
-
-    const activePerKm = isOutstation ? perKmOutstation : perKmLocal;
+    const perMin = parseFloat(rate.per_min || 2);
 
     let effectiveDistance = parseFloat(distanceKm || 0);
     if (effectiveDistance <= 0) {
       effectiveDistance = 5.0;
     }
 
-    let rawDistanceForCalc = effectiveDistance;
-    if (isOutstation && tripType === 'Round trip') {
-      rawDistanceForCalc = effectiveDistance * 2;
-    }
+    let calculatedFare = minFare;
 
-    let calculatedFare = baseFare + (rawDistanceForCalc * activePerKm);
-    
-    let nightAllowance = 0;
-    if (rate.night_surge) {
-      nightAllowance = 20; 
-      calculatedFare += nightAllowance;
+    if (bookingMode === 'RENTAL') {
+      const hours = parseFloat(rentalHours || 1.0);
+      calculatedFare = baseFare + (hours * 60 * perMin) + (effectiveDistance * perKmLocal);
+    } else if (isOutstation) {
+      let rawDistanceForCalc = effectiveDistance;
+      if (tripType === 'Round trip') {
+        rawDistanceForCalc = effectiveDistance * 2;
+      }
+      calculatedFare = baseFare + (rawDistanceForCalc * perKmOutstation) + 100;
+    } else {
+      calculatedFare = baseFare + (effectiveDistance * perKmLocal);
+      if (rate.night_surge) {
+        calculatedFare += 20;
+      }
     }
-
-    let driverAllowance = isOutstation ? 100 : 0;
-    calculatedFare += driverAllowance;
 
     if (calculatedFare < minFare) calculatedFare = minFare;
-
-    calculatedFare = calculatedFare * 1.28;
+    calculatedFare = calculatedFare * 1.28; // Tax & margin multipliers
     calculatedFare = Math.round(calculatedFare * 100) / 100;
 
     const platformCut = Math.round((calculatedFare * 0.10) * 100) / 100;
@@ -424,18 +423,10 @@ const handleEstimateRide = async (req, res) => {
     res.json({
       success: true,
       estimatedFare: Math.round(calculatedFare),
-      perKmRate: activePerKm,
+      perKmRate: bookingMode === 'RENTAL' ? perKmLocal : (isOutstation ? perKmOutstation : perKmLocal),
       platformCut,
       driverEarnings,
-      effectiveDistance,
-      nightAllowance,
-      driverAllowance,
-      taxBreakdown: {
-        gstPercentage: 18,
-        commissionPercentage: 10,
-        totalMultiplier: "28% (10% Comm + 18% GST)"
-      },
-      tollNotice: isOutstation ? "Toll and Parking not included" : null
+      effectiveDistance
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -445,9 +436,6 @@ const handleEstimateRide = async (req, res) => {
 app.post('/api/rides/estimate', handleEstimateRide);
 app.post('/rides/estimate', handleEstimateRide);
 
-// ==========================================
-// RIDE HISTORY ROUTE (DEFINED BEFORE :rideId)
-// ==========================================
 const handleRideHistory = async (req, res) => {
   try {
     const rawUserId = req.query.userId || req.query.riderId;
@@ -502,9 +490,6 @@ const handleRideHistory = async (req, res) => {
 app.get('/api/rides/history', handleRideHistory);
 app.get('/rides/history', handleRideHistory);
 
-// ==========================================
-// SINGLE RIDE ROUTE
-// ==========================================
 app.get('/api/rides/:rideId', async (req, res) => {
   const { rideId } = req.params;
   try {
