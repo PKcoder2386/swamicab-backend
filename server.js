@@ -445,6 +445,66 @@ const handleEstimateRide = async (req, res) => {
 app.post('/api/rides/estimate', handleEstimateRide);
 app.post('/rides/estimate', handleEstimateRide);
 
+// ==========================================
+// RIDE HISTORY ROUTE (DEFINED BEFORE :rideId)
+// ==========================================
+const handleRideHistory = async (req, res) => {
+  try {
+    const rawUserId = req.query.userId || req.query.riderId;
+    const userId = (rawUserId && rawUserId !== "null" && rawUserId !== "undefined") ? parseInt(rawUserId, 10) : null;
+    
+    let baseQuery = `
+      SELECT r.ride_id as id, 
+              r.vehicle_category as "vehicleType", 
+              COALESCE(dp.vehicle_model, r.vehicle_category || ' Standard') as "vehicleModel", 
+              CASE 
+                WHEN LOWER(r.status) IN ('cancelled', 'cancel') THEN 'CANCELLED'
+                WHEN LOWER(r.status) = 'completed' THEN 'COMPLETED'
+                WHEN LOWER(r.status) = 'ongoing' THEN 'ONGOING'
+                WHEN LOWER(r.status) IN ('accepted', 'pending') THEN 'UPCOMING'
+                ELSE COALESCE(UPPER(r.status), 'UPCOMING')
+              END as status, 
+              'Pune' as "pickupCity", r.pickup as "pickupAddress", 
+              'Pune' as "dropCity", r.destination as "dropAddress", 
+              TO_CHAR(r.created_at, 'DD Mon') as date, 
+              TO_CHAR(r.created_at, 'HH12:MI AM') as time, 
+              COALESCE(r.fare, 0) as fare, 
+              COALESCE(u.full_name, 'Searching for Driver...') as "driverName", 
+              COALESCE(dp.vehicle_number, 'Pending Assignment') as "vehicleRegNo",
+              COALESCE(u.phone_number, '') as "driverPhone"
+       FROM rides r
+       LEFT JOIN users u ON r.driver_id = u.id
+       LEFT JOIN driver_profiles dp ON u.id = dp.user_id
+    `;
+
+    let ridesRes;
+    if (userId) {
+      const filteredRes = await pool.query(
+        baseQuery + ` WHERE r.rider_id = $1 OR r.driver_id = $1 ORDER BY r.created_at DESC LIMIT 50`,
+        [userId]
+      );
+      
+      if (filteredRes.rows.length > 0) {
+        ridesRes = filteredRes;
+      } else {
+        ridesRes = await pool.query(baseQuery + ` ORDER BY r.created_at DESC LIMIT 50`);
+      }
+    } else {
+      ridesRes = await pool.query(baseQuery + ` ORDER BY r.created_at DESC LIMIT 50`);
+    }
+
+    res.json(ridesRes.rows);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+};
+
+app.get('/api/rides/history', handleRideHistory);
+app.get('/rides/history', handleRideHistory);
+
+// ==========================================
+// SINGLE RIDE ROUTE
+// ==========================================
 app.get('/api/rides/:rideId', async (req, res) => {
   const { rideId } = req.params;
   try {
@@ -667,60 +727,6 @@ app.post('/api/rides/cancel', async (req, res) => {
   }
 });
 
-const handleRideHistory = async (req, res) => {
-  try {
-    const rawUserId = req.query.userId || req.query.riderId;
-    const userId = (rawUserId && rawUserId !== "null" && rawUserId !== "undefined") ? parseInt(rawUserId, 10) : null;
-    
-    let baseQuery = `
-      SELECT r.ride_id as id, 
-              r.vehicle_category as "vehicleType", 
-              COALESCE(dp.vehicle_model, r.vehicle_category || ' Standard') as "vehicleModel", 
-              CASE 
-                WHEN LOWER(r.status) IN ('cancelled', 'cancel') THEN 'CANCELLED'
-                WHEN LOWER(r.status) = 'completed' THEN 'COMPLETED'
-                WHEN LOWER(r.status) = 'ongoing' THEN 'ONGOING'
-                WHEN LOWER(r.status) IN ('accepted', 'pending') THEN 'UPCOMING'
-                ELSE COALESCE(UPPER(r.status), 'UPCOMING')
-              END as status, 
-              'Pune' as "pickupCity", r.pickup as "pickupAddress", 
-              'Pune' as "dropCity", r.destination as "dropAddress", 
-              TO_CHAR(r.created_at, 'DD Mon') as date, 
-              TO_CHAR(r.created_at, 'HH12:MI AM') as time, 
-              COALESCE(r.fare, 0) as fare, 
-              COALESCE(u.full_name, 'Searching for Driver...') as "driverName", 
-              COALESCE(dp.vehicle_number, 'Pending Assignment') as "vehicleRegNo",
-              COALESCE(u.phone_number, '') as "driverPhone"
-       FROM rides r
-       LEFT JOIN users u ON r.driver_id = u.id
-       LEFT JOIN driver_profiles dp ON u.id = dp.user_id
-    `;
-
-    let ridesRes;
-    if (userId) {
-      const filteredRes = await pool.query(
-        baseQuery + ` WHERE r.rider_id = $1 OR r.driver_id = $1 ORDER BY r.created_at DESC LIMIT 50`,
-        [userId]
-      );
-      
-      if (filteredRes.rows.length > 0) {
-        ridesRes = filteredRes;
-      } else {
-        ridesRes = await pool.query(baseQuery + ` ORDER BY r.created_at DESC LIMIT 50`);
-      }
-    } else {
-      ridesRes = await pool.query(baseQuery + ` ORDER BY r.created_at DESC LIMIT 50`);
-    }
-
-    res.json(ridesRes.rows);
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-};
-
-app.get('/api/rides/history', handleRideHistory);
-app.get('/rides/history', handleRideHistory);
-
 app.get('/api/wallet/balance', async (req, res) => {
   const { userId } = req.query;
   try {
@@ -879,7 +885,7 @@ app.put('/api/admin/settings', async (req, res) => {
   try {
     const checkRes = await pool.query('SELECT id FROM admin_settings ORDER BY id ASC LIMIT 1');
     if (checkRes.rows.length === 0) {
-      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, ипиId]);
+      await pool.query(`INSERT INTO admin_settings (app_name, support_email, currency, time_zone, commission_percentage, base_booking_fee, cancellation_fee, driver_payout_cycle, account_holder_name, account_number, ifsc_code, bank_name, upi_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId]);
     } else {
       await pool.query(`UPDATE admin_settings SET app_name = $1, support_email = $2, currency = $3, time_zone = $4, commission_percentage = $5, base_booking_fee = $6, cancellation_fee = $7, driver_payout_cycle = $8, account_holder_name = $9, account_number = $10, ifsc_code = $11, bank_name = $12, upi_id = $13 WHERE id = $14`, [appName, supportEmail, currency, timeZone, commissionPercentage, baseBookingFee, cancellationFee, driverPayoutCycle, accountHolderName, accountNumber, ifscCode, bankName, upiId, checkRes.rows[0].id]);
     }
